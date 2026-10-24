@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Detecting Windows Persistence with Wazuh and Sysmon · SAMspl0it</title>
+<meta name="description" content="Registry Run keys and scheduled tasks, detected end to end with Sysmon telemetry, Wazuh rules, and Atomic Red Team tests.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="../">SAM<span class="dot">spl0it</span></a>
+    <nav><a href="../#posts">Posts</a><a href="../#projects">Projects</a></nav>
+    <span class="spacer"></span>
+    <a class="ghbtn" href="https://github.com/SAMsploit1">GitHub ↗</a>
+  </div>
+</header>
+
+<main>
+  <div class="kicker">Detection Engineering · Wazuh · Sysmon</div>
+  <h1>Detecting Windows Persistence with Wazuh and Sysmon</h1>
+  <p class="dek">Registry Run keys and scheduled tasks are two routes to the same goal. Sysmon, a handful of Wazuh rules, and Atomic Red Team catch both and prove it.</p>
+
+  <div class="byline">
+    <div class="avatar">S</div>
+    <div>
+      <div class="who">SAMspl0it</div>
+      <div class="meta"><time datetime="2026-10-24">2026-10-24</time> · 2 min read</div>
+    </div>
+  </div>
+
+
+    <p>Initial access is hard to stop. Phishing works, and sooner or later something runs that shouldn't. The better chance to catch an attacker is the step that comes right after: making sure their code runs again after a reboot or the next logon.</p>
+    <p>That step rarely involves anything clever. In this post I set up Sysmon and Wazuh to detect the two most common ways it's done, Registry Run keys and scheduled tasks, and then trigger both with commands from Atomic Red Team to confirm the alerts fire.</p>
+
+    <h2>Persistence is a goal, not a technique</h2>
+    <p>Defenders tend to think of persistence as a list of mechanisms: Run keys, scheduled tasks, services, startup folders. Attackers think of it as one question:</p>
+    <blockquote>Will my code run again after the user logs back in or the machine restarts?</blockquote>
+    <p>Run keys and scheduled tasks are two answers to the same question, and attackers swap between them freely. That's why it makes sense to detect them together.</p>
+
+    <h2>Set up Sysmon</h2>
+    <p>Sysmon is a Sysinternals tool that logs process creation, network connections, and file and registry changes to the Windows Event Log. Wazuh picks those events up from there.</p>
+    <ol>
+      <li>Download Sysmon from Microsoft Sysinternals and extract it.</li>
+      <li>In an elevated PowerShell session, download Olaf Hartong's <a href="https://github.com/olafhartong/sysmon-modular">sysmon-modular</a> config. It tags each event with its MITRE ATT&amp;CK technique, which the rules below rely on.</li>
+    </ol>
+<pre><code>curl https://raw.githubusercontent.com/olafhartong/sysmon-modular/refs/heads/master/sysmonconfig.xml -o sysmonconfig.xml</code></pre>
+    <ol start="3">
+      <li>Install Sysmon with that config:</li>
+    </ol>
+<pre><code>Sysmon64.exe -accepteula -i sysmonconfig.xml</code></pre>
+    <ol start="4">
+      <li>In the Wazuh dashboard, open <strong>Agent Management</strong>, select the endpoint's group, and add the Sysmon channel to its configuration:</li>
+    </ol>
+<pre><code>&lt;localfile&gt;
+  &lt;location&gt;Microsoft-Windows-Sysmon/Operational&lt;/location&gt;
+  &lt;log_format&gt;eventchannel&lt;/log_format&gt;
+&lt;/localfile&gt;</code></pre>
+    <ol start="5">
+      <li>Restart the agent on the endpoint:</li>
+    </ol>
+<pre><code>Restart-Service -Name wazuh</code></pre>
+
+    <h2>Add the detection rules</h2>
+    <p>Go to <strong>Server Management → Rules → Manage rule files</strong>, open <code>local_rules.xml</code>, and add the rules below. Each one matches the ATT&amp;CK tag that sysmon-modular writes into <code>ruleName</code>. Alongside the two persistence techniques, I included a few related ones that use the same pattern.</p>
+<pre><code>&lt;group name="windows,sysmon,"&gt;
+
+&lt;rule id="115001" level="10"&gt;
+  &lt;if_group&gt;windows&lt;/if_group&gt;
+  &lt;field name="win.eventdata.ruleName" type="pcre2"&gt;technique_id=T1053,technique_name=Scheduled Task&lt;/field&gt;
+  &lt;description&gt;A Newly Scheduled Task has been Detected on $(win.system.computer)&lt;/description&gt;
+  &lt;mitre&gt;
+    &lt;id&gt;T1053&lt;/id&gt;
+  &lt;/mitre&gt;
+&lt;/rule&gt;
+
+&lt;rule id="115002" level="10"&gt;
+  &lt;if_group&gt;windows&lt;/if_group&gt;
+  &lt;field name="win.eventdata.ruleName" type="pcre2"&gt;technique_id=T1073,technique_name=DLL Side-Loading&lt;/field&gt;
+  &lt;description&gt;DLL Side-Loading Detected on $(win.system.computer)&lt;/description&gt;
+  &lt;mitre&gt;
+    &lt;id&gt;T1073&lt;/id&gt;
+    &lt;id&gt;T1574.002&lt;/id&gt;
+  &lt;/mitre&gt;
+&lt;/rule&gt;
+
+&lt;rule id="115003" level="10"&gt;
+  &lt;if_group&gt;windows&lt;/if_group&gt;
+  &lt;field name="win.eventdata.ruleName" type="pcre2"&gt;technique_id=T1218.010,technique_name=Regsvr32&lt;/field&gt;
+  &lt;description&gt;Signed Binary Proxy Execution using Regsvr32 Detected on $(win.system.computer)&lt;/description&gt;
+  &lt;mitre&gt;
+    &lt;id&gt;T1218&lt;/id&gt;
+    &lt;id&gt;T1117&lt;/id&gt;
+  &lt;/mitre&gt;
+&lt;/rule&gt;
+
+&lt;rule id="115004" level="10"&gt;
+  &lt;if_group&gt;windows&lt;/if_group&gt;
+  &lt;field name="win.eventdata.ruleName" type="pcre2"&gt;technique_id=T1518.001,technique_name=Security Software Discovery&lt;/field&gt;
+  &lt;description&gt;Security Software Discovery Attempt has been Detected on $(win.system.computer)&lt;/description&gt;
+  &lt;mitre&gt;
+    &lt;id&gt;T1518&lt;/id&gt;
+  &lt;/mitre&gt;
+&lt;/rule&gt;
+
+&lt;rule id="115005" level="10"&gt;
+  &lt;if_group&gt;windows&lt;/if_group&gt;
+  &lt;field name="win.eventdata.ruleName" type="pcre2"&gt;technique_id=T1548.002,technique_name=Bypass User Access Control&lt;/field&gt;
+  &lt;description&gt;Privilege Escalation Through Bypass of UAC has been Detected on $(win.system.computer)&lt;/description&gt;
+  &lt;mitre&gt;
+    &lt;id&gt;T1548.002&lt;/id&gt;
+    &lt;id&gt;T1088&lt;/id&gt;
+  &lt;/mitre&gt;
+&lt;/rule&gt;
+
+&lt;rule id="115006" level="10"&gt;
+  &lt;if_group&gt;windows&lt;/if_group&gt;
+  &lt;field name="win.eventdata.ruleName" type="pcre2"&gt;technique_id=T1547.001,technique_name=Registry Run Keys / Start Folder&lt;/field&gt;
+  &lt;description&gt;Registry Key used in Startup Folder on $(win.system.computer)&lt;/description&gt;
+  &lt;mitre&gt;
+    &lt;id&gt;T1547.001&lt;/id&gt;
+    &lt;id&gt;T1547&lt;/id&gt;
+  &lt;/mitre&gt;
+&lt;/rule&gt;
+&lt;/group&gt;</code></pre>
+    <p>Save, then restart the manager.</p>
+
+    <h2>Test it</h2>
+    <p>The commands below come from <a href="https://github.com/redcanaryco/atomic-red-team">Atomic Red Team</a>, an open-source library of small, ATT&amp;CK-mapped tests. They produce the same telemetry a real attacker would, without any actual malware.</p>
+
+    <h3>Scenario 1: Registry Run key</h3>
+    <p>On the endpoint, add a Run key entry:</p>
+<pre><code>New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "Updater" -Value "%LOCALAPPDATA%\Microsoft\WindowsApps\updater.exe" -PropertyType ExpandString -Force</code></pre>
+    <p>In Wazuh, open <strong>Threat Hunting → Events</strong>. Rule 115006 should appear within a few seconds.</p>
+    <figure><img src="../assets/persistence-runkey-alert.png" alt="Rule 115006 firing on the Run key write" loading="lazy" onerror="this.closest('figure').hidden=true"><figcaption>Rule 115006 firing on the Run key write</figcaption></figure>
+
+    <h3>Scenario 2: Scheduled tasks at logon and startup</h3>
+    <p>From a command prompt, create two tasks, one that runs at logon and one that runs at startup as SYSTEM:</p>
+<pre><code>schtasks /create /tn "T1053_005_OnLogon" /sc onlogon /tr "cmd.exe /c calc.exe"
+schtasks /create /tn "T1053_005_OnStartup" /sc onstart /ru system /tr "cmd.exe /c calc.exe"</code></pre>
+    <p>In <strong>Threat Hunting → Events</strong>, filter on <code>rule.id: 115001</code>.</p>
+    <figure><img src="../assets/persistence-schtask-alert.png" alt="Rule 115001 alerts for the scheduled tasks" loading="lazy" onerror="this.closest('figure').hidden=true"><figcaption>Rule 115001 alerts for the scheduled tasks</figcaption></figure>
+    <p>Clean up afterwards:</p>
+<pre><code>schtasks /delete /tn "T1053_005_OnLogon" /f &gt;nul 2&gt;&amp;1
+schtasks /delete /tn "T1053_005_OnStartup" /f &gt;nul 2&gt;&amp;1</code></pre>
+
+    <h2>Takeaways</h2>
+    <p>Run keys and scheduled tasks stay popular because they look like normal Windows activity. With Sysmon providing the telemetry and sysmon-modular providing the ATT&amp;CK tags, each new detection in Wazuh is a few lines of XML, and Atomic Red Team gives you a quick way to prove each one works. Coverage can grow one technique at a time.</p>
+
+  <div class="cta">
+    <h3 class="sans">More from the lab</h3>
+    <p>Detections, integrations, and write-ups on Wazuh and friends.</p>
+    <a class="ghbtn" href="../">All posts ↗</a>
+  </div>
+</main>
+
+<footer>
+  <p>Written by <strong>SAMspl0it</strong> · <a href="../">more posts</a>.
+  Wazuh and the Wazuh logo are trademarks of Wazuh Inc.; this is an independent community project.</p>
+</footer>
+
+</body>
+</html>

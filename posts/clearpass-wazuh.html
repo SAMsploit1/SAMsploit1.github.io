@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HPE Aruba ClearPass &amp; Wazuh Integration · SAMspl0it</title>
+<meta name="description" content="Forwarding ClearPass RADIUS accounting logs to Wazuh over syslog, with custom decoders and a rule that names the IP, MAC, and user for each session.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="../">SAM<span class="dot">spl0it</span></a>
+    <nav><a href="../#posts">Posts</a><a href="../#projects">Projects</a></nav>
+    <span class="spacer"></span>
+    <a class="ghbtn" href="https://github.com/SAMsploit1">GitHub ↗</a>
+  </div>
+</header>
+
+<main>
+  <div class="kicker">Integration · Wazuh · ClearPass</div>
+  <h1>HPE Aruba ClearPass &amp; Wazuh Integration</h1>
+  <p class="dek">Forward ClearPass RADIUS accounting to Wazuh over syslog, decode it, and turn every session into one readable alert: leased IP, MAC address, and username.</p>
+
+  <div class="byline">
+    <div class="avatar">S</div>
+    <div>
+      <div class="who">SAMspl0it</div>
+      <div class="meta"><time datetime="2026-10-24">2026-10-24</time> · 2 min read</div>
+    </div>
+  </div>
+
+
+    <p>ClearPass knows who is on your network: which user, which device, which IP, and when. That information is far more useful in a SIEM, next to firewall and endpoint logs, than sitting in the ClearPass console.</p>
+    <p>This guide forwards ClearPass RADIUS accounting logs to Wazuh over syslog, parses them with custom decoders, and turns each session into one readable alert. The same approach works for any log type ClearPass can export: authentications, policy events, admin changes, and system alerts.</p>
+
+    <h2>Step 1: Send syslog from ClearPass</h2>
+    <p>Go to <strong>Administration → External Servers → Syslog Targets</strong> and add a target:</p>
+    <ul>
+      <li><strong>Host Address:</strong> your Wazuh manager's IP</li>
+      <li><strong>Protocol / Port:</strong> UDP or TCP, 514</li>
+    </ul>
+    <figure><img src="../assets/clearpass-syslog-target.png" alt="Syslog target pointing at the Wazuh manager on UDP 514" loading="lazy" onerror="this.closest('figure').hidden=true"><figcaption>Syslog target pointing at the Wazuh manager on UDP 514</figcaption></figure>
+    <p>Next, go to <strong>Administration → External Servers → Syslog Export Filters</strong> and create a filter for the logs you want. On the <strong>General</strong> tab, attach the syslog target you just created.</p>
+    <figure><img src="../assets/clearpass-export-filter-general.png" alt="Export filter with the Wazuh syslog target attached" loading="lazy" onerror="this.closest('figure').hidden=true"><figcaption>Export filter with the Wazuh syslog target attached</figcaption></figure>
+    <p>On the <strong>Filter and Columns</strong> tab, set:</p>
+    <ul>
+      <li><strong>Data Filter:</strong> [Active Sessions]</li>
+      <li><strong>Column Selection:</strong> RADIUS Accounting</li>
+      <li><strong>Type:</strong> Common</li>
+    </ul>
+    <figure><img src="../assets/clearpass-export-filter-columns.png" alt="Filter and Columns: Active sessions, RADIUS Accounting columns" loading="lazy" onerror="this.closest('figure').hidden=true"><figcaption>Filter and Columns: Active sessions, RADIUS Accounting columns</figcaption></figure>
+    <p>Before version 6.11.0, getting the leased IP (Framed-IP-Address) into the export required a custom SQL query under Option 2. From 6.11.0 it is available directly in Option 1. If you are on an older version, this is the query Aruba provides on the Innovation Zone:</p>
+<pre><code>SELECT seq_num, id as session_id, user_name, nas_ip_address as nas_ip, nas_port, nas_port_type, calling_station_id, called_station_id, framed_ip_address as ip_address, service_type, acct_status_type, acct_delay_time, acct_input_octets, acct_output_octets, acct_input_packets, acct_output_packets, acct_session_id, acct_authentic, acct_session_time, acct_terminate_cause, timestamp FROM tips_radius_accounting_log WHERE ((timestamp &gt;= --START-TIME--) AND (timestamp &lt;= --END-TIME--))</code></pre>
+    <p>Save the filter.</p>
+
+    <h2>Step 2: Receive syslog on Wazuh</h2>
+    <p>On the manager, open <code>/var/ossec/etc/ossec.conf</code> and add a syslog listener:</p>
+<pre><code>&lt;remote&gt;
+  &lt;connection&gt;syslog&lt;/connection&gt;
+  &lt;port&gt;514&lt;/port&gt;
+  &lt;protocol&gt;udp&lt;/protocol&gt;
+  &lt;allowed-ips&gt;0.0.0.0/0&lt;/allowed-ips&gt;
+&lt;/remote&gt;</code></pre>
+    <p><code>allowed-ips</code> controls who may send syslog. <code>0.0.0.0/0</code> accepts anything, which is fine for a lab; in production, restrict it to your ClearPass nodes.</p>
+    <figure><img src="../assets/clearpass-ossec-remote.png" alt="The syslog remote block added to ossec.conf" loading="lazy" onerror="this.closest('figure').hidden=true"><figcaption>The syslog remote block added to ossec.conf</figcaption></figure>
+    <p>Restart the manager:</p>
+<pre><code>sudo systemctl restart wazuh-manager</code></pre>
+
+    <h2>Step 3: Confirm logs are arriving</h2>
+<pre><code>sudo tcpdump -i any port 514 -n
+tail -f /var/ossec/logs/archives/archives.log | grep cpass</code></pre>
+    <p class="note">The archives log is only written once archiving is enabled in <code>ossec.conf</code>. To browse archived events in the dashboard as well, enable archives in <code>filebeat.yml</code>. See the Wazuh docs on <a href="https://documentation.wazuh.com/current/user-manual/manager/event-logging.html">event logging</a>.</p>
+    <p>With the filter above, a RADIUS accounting event looks like this:</p>
+<pre><code>Aug 10 15:50:04 cpass 2025-08-10 15:50:04,760 xx.xxx.xx.xx Radius Accounting 18565 1 0 seq_num=93246,session_id=R0000119d-01-68989862,user_name=xxx\\xxxxx,nas_ip=xx.xxx.xx.x,nas_port=0,nas_port_type=Wireless-802.11,calling_station_id=xxxxxx,called_station_id=xxxxxxx:xxxx,ip_address=xxx.xxx.x.xxx,acct_status_type=Interim-Update,accct_delay_time=0,acct_input_octets=64,acct_output_octets=7125,acct_input_packets=1,acct_output_packets=45,acct_session_id=xxxx-6894BF5F,acct_session_time=262051,timestamp=2025-08-10 15:49:50.355+02</code></pre>
+
+    <h2>Step 4: Add the decoders</h2>
+    <p>Create <code>/var/ossec/etc/decoders/Arubaclearpass_custom.xml</code>:</p>
+<pre><code>&lt;decoder name="ArubaClearpass_custom"&gt;
+  &lt;prematch&gt;Radius Accounting&lt;/prematch&gt;
+&lt;/decoder&gt;
+
+&lt;decoder name="ArubaClearpass_custom"&gt;
+  &lt;parent&gt;ArubaClearpass_custom&lt;/parent&gt;
+  &lt;regex&gt;nas_ip=(\.+),&lt;/regex&gt;
+  &lt;order&gt;NAS_IP&lt;/order&gt;
+&lt;/decoder&gt;
+
+&lt;decoder name="ArubaClearpass_custom"&gt;
+  &lt;parent&gt;ArubaClearpass_custom&lt;/parent&gt;
+  &lt;regex&gt;user_name=(\.+),&lt;/regex&gt;
+  &lt;order&gt;user_name&lt;/order&gt;
+&lt;/decoder&gt;
+
+&lt;decoder name="ArubaClearpass_custom"&gt;
+  &lt;parent&gt;ArubaClearpass_custom&lt;/parent&gt;
+  &lt;regex&gt;ip_address=(\.+),&lt;/regex&gt;
+  &lt;order&gt;ip_address&lt;/order&gt;
+&lt;/decoder&gt;
+
+&lt;decoder name="ArubaClearpass_custom"&gt;
+  &lt;parent&gt;ArubaClearpass_custom&lt;/parent&gt;
+  &lt;regex&gt;calling_station_id=(\.+),&lt;/regex&gt;
+  &lt;order&gt;host_mac&lt;/order&gt;
+&lt;/decoder&gt;
+
+&lt;decoder name="ArubaClearpass_custom"&gt;
+  &lt;parent&gt;ArubaClearpass_custom&lt;/parent&gt;
+  &lt;regex&gt;nas_port_type=(\.+),&lt;/regex&gt;
+  &lt;order&gt;host_mac&lt;/order&gt;
+&lt;/decoder&gt;</code></pre>
+
+    <h2>Step 5: Add a rule</h2>
+    <p>The rule pulls out the three fields that matter most, leased IP, MAC address, and username, and puts them in one sentence. Create <code>/var/ossec/etc/rules/ArubaClearpass.xml</code>:</p>
+<pre><code>&lt;group name="local"&gt;
+  &lt;rule id="100100" level="5"&gt;
+    &lt;decoded_as&gt;ArubaClearpass_custom&lt;/decoded_as&gt;
+    &lt;description&gt;Leased IP Address: $(ip_address), to client with MAC Address: $(host_mac), and username: $(user_name).&lt;/description&gt;
+  &lt;/rule&gt;
+&lt;/group&gt;</code></pre>
+    <p>Restart the manager again:</p>
+<pre><code>sudo systemctl restart wazuh-manager</code></pre>
+
+    <h2>Step 6: Test with wazuh-logtest</h2>
+    <p>Run <code>/var/ossec/bin/wazuh-logtest</code> and paste the sample event from step 3. You should see the fields extracted in phase 2 and rule 100100 fire in phase 3.</p>
+    <figure><img src="../assets/clearpass-logtest.png" alt="wazuh-logtest decoding the sample log and firing rule 100100" loading="lazy" onerror="this.closest('figure').hidden=true"><figcaption>wazuh-logtest decoding the sample log and firing rule 100100</figcaption></figure>
+
+    <h2>Where to go next</h2>
+    <p>This covers one log type, but the pattern is the same for the rest: export it, decode it, write a rule. A few simple dashboard panels, such as authentication successes vs. failures, top users, and busiest NAS devices, pay off quickly and are easy to extend.</p>
+
+  <div class="cta">
+    <h3 class="sans">More from the lab</h3>
+    <p>Detections, integrations, and write-ups on Wazuh and friends.</p>
+    <a class="ghbtn" href="../">All posts ↗</a>
+  </div>
+</main>
+
+<footer>
+  <p>Written by <strong>SAMspl0it</strong> · <a href="../">more posts</a>.
+  Wazuh and the Wazuh logo are trademarks of Wazuh Inc.; this is an independent community project.</p>
+</footer>
+
+</body>
+</html>

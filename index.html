@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SAMspl0it</title>
+<meta name="description" content="Notes from the lab: detection engineering, Wazuh integrations, and write-ups.">
+<meta property="og:title" content="SAMspl0it">
+<meta property="og:description" content="Notes from the lab: detection engineering, Wazuh integrations, and write-ups.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="assets/1-threat-hunting-dashboard.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="./">SAM<span class="dot">spl0it</span></a>
+    <nav><a href="#posts">Posts</a><a href="#projects">Projects</a></nav>
+    <span class="spacer"></span>
+    <a class="ghbtn" href="https://github.com/SAMsploit1">GitHub ↗</a>
+  </div>
+</header>
+
+<main>
+  <div class="kicker">Notes from the lab</div>
+  <h1>SAMspl0it</h1>
+  <p class="dek">Detections, integrations, and write-ups. Mostly Wazuh, Sysmon, and auditd, plus the parts that were hard to figure out.</p>
+
+  <h2 class="section" id="posts">Posts</h2>
+  <!-- New post: copy posts/_template.html to posts/<slug>.html, then add an <li> at the top of this list. -->
+  <ul class="posts">
+    <li>
+      <div class="pk">Detection Engineering · Wazuh · Sysmon</div>
+      <h3 class="sans"><a href="posts/windows-persistence-wazuh.html">Detecting Windows Persistence with Wazuh and Sysmon</a></h3>
+      <p>Run keys and scheduled tasks are two routes to the same goal. Sysmon telemetry, Wazuh rules keyed on ATT&amp;CK tags, and Atomic Red Team to prove they fire.</p>
+      <div class="meta">2026-10-24 · 2 min read</div>
+    </li>
+    <li>
+      <div class="pk">Integration · Wazuh · ClearPass</div>
+      <h3 class="sans"><a href="posts/clearpass-wazuh.html">HPE Aruba ClearPass &amp; Wazuh Integration</a></h3>
+      <p>ClearPass RADIUS accounting into Wazuh over syslog, decoded into one alert per session: leased IP, MAC address, and username.</p>
+      <div class="meta">2026-10-24 · 2 min read</div>
+    </li>
+    <li>
+      <div class="pk">Detection Engineering · Wazuh</div>
+      <h3 class="sans"><a href="https://samsploit1.github.io/shellcatch/">Catching the moment a web app becomes a shell</a></h3>
+      <p>Webshells, command injection, and RCE all end the same way: the web runtime spawns a process. Three detection layers, and why every reverse shell reaches auditd as hex.</p>
+      <div class="meta">2026-10-24 · 6 min read</div>
+    </li>
+  </ul>
+
+  <h2 class="section" id="projects">Projects</h2>
+  <a class="proj" href="https://github.com/SAMsploit1/shellcatch">
+    <div class="n">shellcatch <span class="s">Open source</span></div>
+    <p>Web-to-shell Wazuh ruleset with a vulnerable Docker lab and a test suite that runs against a live logtest engine.</p>
+  </a>
+</main>
+
+<footer>
+  <p><strong>SAMspl0it</strong> · <a href="https://github.com/SAMsploit1">GitHub</a>.
+  Wazuh and the Wazuh logo are trademarks of Wazuh Inc.; this is an independent community project.</p>
+</footer>
+
+</body>
+</html>
