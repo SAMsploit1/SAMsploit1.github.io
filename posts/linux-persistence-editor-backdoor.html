@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Who wrote that key? Catching Linux persistence from a trojanized editor extension · SAMspl0it</title>
+<meta name="description" content="A trojanized editor extension plants an SSH backdoor as a node process. Attributing the writer with auditd — and why Wazuh FIM who-data can't do it.">
+<meta property="og:title" content="Who wrote that key? Catching Linux persistence with Wazuh">
+<meta property="og:description" content="A trojanized editor extension plants an SSH backdoor as a node process. Attributing the writer with auditd — and why Wazuh FIM who-data can't do it.">
+<meta property="og:type" content="article">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="../">SAM<span class="dot">spl0it</span></a>
+    <nav><a href="../#posts">Posts</a><a href="../#projects">Projects</a></nav>
+    <span class="spacer"></span>
+    <a class="ghbtn" href="https://github.com/SAMsploit1">GitHub ↗</a>
+  </div>
+</header>
+
+<main>
+  <div class="kicker">Detection Engineering · Wazuh · auditd</div>
+  <h1>Who wrote that key? Catching Linux persistence from a trojanized editor extension</h1>
+  <p class="dek">An editor extension plants an SSH backdoor across the whole Linux persistence surface — as an ordinary <code>node</code> process. The detection reduces to one question: who wrote this file? Here's the ruleset, and the one place Wazuh's obvious answer doesn't work.</p>
+
+  <div class="byline">
+    <div class="avatar">S</div>
+    <div>
+      <div class="who">SAMspl0it</div>
+      <div class="meta"><time datetime="2026-11-03">2026-11-03</time> · 7 min read</div>
+    </div>
+  </div>
+
+  <p>On 29 October 2026 a trojanized <code>anthropic.claude-code</code> extension showed up on the Cursor marketplace. Microsoft Threat Intelligence <a href="https://www.microsoft.com/en-us/security/blog/2026/10/30/inside-malicious-claude-code-branded-cursor-extension-persistent-ssh-backdoor/">pulled it apart</a>: once installed, the extension host — an ordinary <code>node</code> process on the developer's machine — quietly established a persistent SSH backdoor.</p>
+
+  <p>That last detail is the whole story for a defender. The malicious actions are things a developer <em>also</em> does: add an SSH key, write a <code>~/.config</code> file, drop a systemd unit. What makes them malicious is <strong>who did them</strong>. A human running <code>ssh-keygen</code> and editing <code>authorized_keys</code> is Tuesday. A <strong>code editor's extension host</strong> writing to <code>authorized_keys</code> is an incident.</p>
+
+  <p>This post builds a Wazuh ruleset around that single question — <em>who wrote this file?</em> — walks every persistence vector the extension uses, and is honest about the one place Wazuh's obvious answer doesn't work.</p>
+
+  <h2>The persistence surface</h2>
+  <p>The loader doesn't rely on one trick; it sprays the whole Linux persistence surface so that losing any one foothold doesn't matter:</p>
+<pre><code>SSH authorized_keys backdoor key   ~/.ssh/authorized_keys              T1098.004
+Reverse SSH tunnel (exposes sshd)  ssh -R / autossh                   T1572
+Hidden loader + key                ~/.config/.smt, ~/.config/.smtk     T1564.001
+@reboot cron job                   /var/spool/cron/...                 T1053.003
+XDG autostart entry                ~/.config/autostart/*.desktop       T1547.013
+systemd user unit                  ~/.config/systemd/user/*.service    T1543.002
+Shell rc hook                      ~/.bashrc, ~/.zshrc, ...             T1546.004</code></pre>
+  <p>Every one of these is a file write. So the detection reduces to: <strong>watch the sensitive paths, and for each write, capture the process that did it.</strong></p>
+
+  <h2>The lab</h2>
+  <p>Everything below was validated on a throwaway cloud VM — don't do this on a box you care about.</p>
+  <ul>
+    <li><strong>Wazuh 4.x all-in-one</strong> (indexer + manager + dashboard) on Ubuntu 24.04.</li>
+    <li><strong>auditd</strong> installed and running — Wazuh's who-data and our syscall rules both depend on it.</li>
+    <li>A throwaway <code>devuser</code> standing in for the developer's account. The manager self-monitors as agent <code>000</code>, so <code>devuser</code>'s home is under FIM.</li>
+    <li>A <strong>safe</strong> re-enactment script. It generates a fresh key pair on the host (the real attacker key is never used) and points the tunnel at <code>127.0.0.1</code>, so nothing leaves the machine. It mirrors the real sample's file names, key comment, crontab shape and <code>ssh</code> arguments, and crucially it runs <strong>inside a <code>node</code> process</strong>, exactly like an extension host.</li>
+  </ul>
+<pre><code>$ sudo -u devuser node simulate.js            # run the chain
+$ sudo -u devuser node simulate.js --cleanup  # undo it</code></pre>
+
+  <h2>Vector 1 — the SSH key, and the question Wazuh can't answer the obvious way</h2>
+  <p>Start with the crown jewel: a key appended to <code>authorized_keys</code>. FIM catches the change immediately. Here's the real alert (trimmed):</p>
+<pre><code>{
+  "rule": { "id": "100600", "level": 8,
+            "description": "Editor backdoor: SSH authorized_keys changed" },
+  "syscheck": {
+    "path": "/home/devuser/.ssh/authorized_keys",
+    "event": "modified",
+    "audit": {
+      "process": { "name": "/usr/bin/node", "parent_name": "/usr/bin/sudo" },
+      "effective_user": { "name": "devuser" }
+    }
+  }
+}</code></pre>
+  <p>Look at <code>syscheck.audit.process.name</code>: <strong>/usr/bin/node</strong>. The who-data engine <em>knows</em> a Node process wrote the key. So you'd write the escalation rule to match that field:</p>
+<pre><code>&lt;rule id="100601" level="13"&gt;
+  &lt;if_sid&gt;100600&lt;/if_sid&gt;
+  &lt;field name="audit.process.name" type="pcre2"&gt;(?i)(?:^|/)(?:node|code|cursor|...)$&lt;/field&gt;
+  &lt;description&gt;authorized_keys written by an editor/Node process&lt;/description&gt;
+&lt;/rule&gt;</code></pre>
+  <p><strong>It never fires.</strong></p>
+
+  <p class="note"><strong>The gotcha: FIM who-data is not rule-matchable.</strong> The <code>syscheck.audit.*</code> block is rendered into the <em>alert JSON</em>, but it is not exposed to the <em>rule engine</em> as a matchable <code>&lt;field&gt;</code>. I confirmed this the hard way — three probe rules matching a catch-all <code>.+</code> under <code>syscheck.audit.process.name</code>, <code>audit.process.name</code> and <code>process.name</code>, and none of them matched. Wazuh's own stock ruleset never tries to match FIM who-data either. The data is for the analyst reading the alert, not for the correlation engine. If you've been copying field names out of the JSON and wondering why your FIM who-data rules are silent — that's why.</p>
+
+  <h3 class="sans">Doing it properly: attribute the write with auditd</h3>
+  <p>The fix is to stop relying on FIM for attribution and ask auditd directly. A syscall rule records <em>every</em> write under a subtree <strong>with the executing binary</strong>:</p>
+<pre><code># auditd/62-eb-filewrite.rules
+-a always,exit -F arch=b64 -F dir=/home -F perm=wa -F auid&gt;=1000 -F auid!=unset -k eb_file_write
+-a always,exit -F arch=b64 -F dir=/root -F perm=wa -k eb_file_write
+-a always,exit -F arch=b64 -F dir=/var/spool/cron -F perm=wa -k eb_file_write</code></pre>
+  <p><code>-F dir=</code> is <strong>recursive</strong> (unlike the non-recursive <code>-w</code> watch), so this one line covers every user's <code>.ssh</code>, <code>.config</code>, rc files and more. Now Wazuh's auditd decoder gives us <code>audit.exe</code> (the writer) and <code>audit.file.name</code> (the target) — both first-class, matchable fields:</p>
+<pre><code>&lt;rule id="100650" level="0"&gt;                       &lt;!-- silent base --&gt;
+  &lt;if_sid&gt;80700&lt;/if_sid&gt;
+  &lt;field name="audit.key"&gt;^eb_file_write$&lt;/field&gt;
+&lt;/rule&gt;
+
+&lt;rule id="100651" level="8"&gt;                       &lt;!-- a write to authorized_keys --&gt;
+  &lt;if_sid&gt;100650&lt;/if_sid&gt;
+  &lt;field name="audit.file.name" type="pcre2"&gt;/\.ssh/authorized_keys$&lt;/field&gt;
+  &lt;description&gt;authorized_keys written ($(audit.exe))&lt;/description&gt;
+&lt;/rule&gt;
+
+&lt;rule id="100652" level="13"&gt;                      &lt;!-- ...by an editor/Node process --&gt;
+  &lt;if_sid&gt;100651&lt;/if_sid&gt;
+  &lt;field name="audit.exe" type="pcre2"&gt;(?i)(?:^|/)(?:node|nodejs|bun|deno|electron|cursor|code|code-insiders|code-oss|codium|windsurf)$&lt;/field&gt;
+  &lt;description&gt;Editor backdoor: authorized_keys written by an editor/Node process ($(audit.exe))&lt;/description&gt;
+  &lt;mitre&gt;&lt;id&gt;T1098.004&lt;/id&gt;&lt;id&gt;T1195.002&lt;/id&gt;&lt;/mitre&gt;
+&lt;/rule&gt;</code></pre>
+  <p>Run the simulator and <code>100652</code> fires at level 13:</p>
+<pre><code>Editor backdoor: authorized_keys written by an editor/Node process (/usr/bin/node)</code></pre>
+  <p>That's the detection. A developer adding their own key writes it with <code>ssh-keygen</code>, a text editor, or <code>tee</code> — never <code>node</code>. The level-13 alert says <em>a program that has no business touching your SSH keys just added one.</em></p>
+
+  <figure><img src="../assets/linux-authkeys-node.png" alt="Wazuh alert 100652: authorized_keys written by /usr/bin/node" loading="lazy"><figcaption>Rule 100652 — the writer (<code>data.audit.exe</code>) is <code>/usr/bin/node</code>, not a human.</figcaption></figure>
+
+  <h2>Vectors 2–5 — the same move, everywhere</h2>
+  <p>Because the auditd watch is a recursive subtree, the <em>exact same pattern</em> — match <code>audit.file.name</code> for the location, <code>audit.exe</code> for an editor process — covers the rest of the surface. One idea, five footholds:</p>
+<pre><code>&lt;rule id="100655" level="12"&gt;   &lt;!-- hidden ~/.config drop --&gt;
+  &lt;field name="audit.file.name" type="pcre2"&gt;/\.config/\.[^/]+$&lt;/field&gt; ...
+&lt;rule id="100656" level="12"&gt;   &lt;!-- XDG autostart --&gt;
+  &lt;field name="audit.file.name" type="pcre2"&gt;/\.config/autostart/&lt;/field&gt; ...
+&lt;rule id="100657" level="12"&gt;   &lt;!-- systemd user unit --&gt;
+  &lt;field name="audit.file.name" type="pcre2"&gt;/\.config/systemd/user/.*\.(service|timer)$&lt;/field&gt; ...
+&lt;rule id="100658" level="12"&gt;   &lt;!-- shell rc hook --&gt;
+  &lt;field name="audit.file.name" type="pcre2"&gt;/(\.bashrc|\.zshrc|\.profile|...)$&lt;/field&gt; ...</code></pre>
+  <p>Each also carries the <code>audit.exe</code> editor check. In the lab, all four fire with <code>exe=/usr/bin/node</code>:</p>
+<pre><code>100655  editor/Node process dropped hidden file /home/devuser/.config/.smtk
+100656  XDG autostart entry written by editor/Node process .../claude-code.desktop
+100657  systemd user unit written by editor/Node process .../claude-telemetry.service
+100658  shell rc file written by editor/Node process /home/devuser/.bashrc</code></pre>
+  <p>This is the part FIM who-data could never have done, even if it <em>were</em> matchable: the autostart and systemd-user directories weren't in the original FIM scope at all. The auditd subtree watch gets them for free.</p>
+
+  <figure><img src="../assets/linux-eb-events.png" alt="Wazuh Threat Hunting table filtered on rule.groups:editor_backdoor" loading="lazy"><figcaption>The whole persistence chain in one view: filter <code>rule.groups:editor_backdoor</code>.</figcaption></figure>
+
+  <h2>Vector 6 — the reverse tunnel, from the audit log</h2>
+  <p>The tunnel is a process event, not a file event, so it comes from the ssh execute watch:</p>
+<pre><code>-w /usr/bin/ssh -p x -k eb_ssh_exec</code></pre>
+  <p class="note"><strong>Lab note:</strong> <code>augenrules</code> refuses a <code>-w</code> watch on a path that doesn't exist (e.g. <code>autossh</code> when it isn't installed) and can reject the <em>entire</em> rules file. Either guard those lines or prefer the <code>-F dir=</code> syscall form.</p>
+  <p>The decoded <code>execve</code> arguments carry the tell-tale reverse-tunnel shape — <code>-R *:0:localhost:22</code>, <code>StrictHostKeyChecking=no</code>, a hidden <code>/tmp</code> identity file. The high-value signal, though, is the <strong>correlation</strong>: an <code>authorized_keys</code> change <em>followed by</em> a reverse tunnel within ten minutes is the full backdoor being armed.</p>
+<pre><code>&lt;rule id="100690" level="15" timeframe="600"&gt;
+  &lt;if_matched_group&gt;eb_authkeys&lt;/if_matched_group&gt;
+  &lt;if_group&gt;eb_tunnel&lt;/if_group&gt;
+  &lt;description&gt;authorized_keys change followed by an SSH reverse tunnel (backdoor access path)&lt;/description&gt;
+  &lt;mitre&gt;&lt;id&gt;T1098.004&lt;/id&gt;&lt;id&gt;T1572&lt;/id&gt;&lt;/mitre&gt;
+&lt;/rule&gt;</code></pre>
+  <p><code>100690</code> fires at level 15 — the single alert you actually want paged on.</p>
+
+  <figure><img src="../assets/linux-eb-correlation.png" alt="Wazuh alert 100690 correlating the key add and the reverse tunnel" loading="lazy"><figcaption>Rule 100690 — key add then reverse tunnel inside 10 minutes: the backdoor armed.</figcaption></figure>
+
+  <h2>Two more honest caveats</h2>
+  <p><strong>FIM content rules are blind to a file's first creation.</strong> A rule matching the backdoor key comment with <code>changed_content</code> only works on a <em>modification</em> — the content diff doesn't exist the first time Wazuh sees a file. The real loader <em>creates</em> <code>authorized_keys</code> and the <code>.smt</code> files, so for first detection lean on the auditd writer rules and the file-existence IOCs, not the diff. (In the lab, the content rule fired only after a second write.)</p>
+  <p><strong>crontab isn't written by the editor.</strong> <code>/var/spool/cron</code> is edited through the setuid <code>crontab</code> helper, so <code>audit.exe</code> is <code>/usr/bin/crontab</code>, not <code>node</code>. The <code>@reboot</code> entry is still catchable by content/IOC rules, but you won't get writer attribution for it — a good reminder that "who wrote it" has limits when a trusted helper sits in the middle.</p>
+
+  <h2>Takeaways</h2>
+  <ol>
+    <li><strong>For "which process touched this file" on Linux, reach for auditd <code>-F dir=</code> syscall rules, not FIM who-data.</strong> FIM tells you a file changed and shows the writer to a human; auditd lets the <em>engine</em> act on the writer.</li>
+    <li><strong>A single recursive subtree watch replaces a pile of per-path rules.</strong> Match the location in <code>audit.file.name</code> and the actor in <code>audit.exe</code>, and one auditd rule covers the whole persistence surface.</li>
+    <li><strong>Detect creation by existence/attribution, correlate the kill chain.</strong> File-content diffs miss the first write; the alert you page on is the correlation (key added → tunnel up), not any single file event.</li>
+    <li><strong>The behavioural line is the clean one.</strong> You can't blocklist developers adding SSH keys. You <em>can</em> alert when a code editor's runtime does — that boundary is what turned a pile of benign-looking file writes into one level-15 incident.</li>
+  </ol>
+
+  <div class="cta">
+    <h3 class="sans">More from the lab</h3>
+    <p>Rules and the lab simulator are on GitHub. See also the Windows persistence write-up for the Sysmon side of the same idea.</p>
+    <a class="ghbtn" href="https://github.com/SAMsploit1/editor-backdoor-wip">editor-backdoor on GitHub ↗</a>
+  </div>
+</main>
+
+<footer>
+  <p>Written by <strong>SAMspl0it</strong> · <a href="../">more posts</a>.
+  Wazuh and the Wazuh logo are trademarks of Wazuh Inc.; this is an independent community project.</p>
+</footer>
+</body>
+</html>
