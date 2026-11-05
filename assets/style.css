@@ -72,6 +72,11 @@ pre{background:var(--code-bg);border:1px solid var(--line);border-radius:10px;
   padding:18px 20px;overflow:auto;margin:0 0 24px}
 pre code{background:none;padding:0;font-size:14px;line-height:1.6}
 blockquote{margin:0 0 22px;padding:2px 0 2px 18px;border-left:3px solid var(--line);color:var(--soft);font-style:italic}
+table{width:100%;border-collapse:collapse;font-family:Inter,sans-serif;font-size:14.5px;
+  margin:0 0 24px;display:block;overflow-x:auto}
+th,td{text-align:left;vertical-align:top;padding:9px 12px;border-bottom:1px solid var(--line)}
+th{font-weight:600;color:var(--soft);border-bottom-width:2px}
+td code,th code{font-size:.85em}
 .note{font-family:Inter,sans-serif;font-size:15px;color:var(--soft);border-left:3px solid var(--accent);
   padding:2px 0 2px 16px;margin:0 0 24px}
 .cta{font-family:Inter,sans-serif;margin:40px 0 0;padding:26px;border:1px solid var(--line);
