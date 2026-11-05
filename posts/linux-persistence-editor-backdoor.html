@@ -26,7 +26,7 @@
 <main>
   <div class="kicker">Detection Engineering · Wazuh · auditd</div>
   <h1>Who wrote that key? Catching Linux persistence from a trojanized editor extension</h1>
-  <p class="dek">An editor extension plants an SSH backdoor across the whole Linux persistence surface — as an ordinary <code>node</code> process. The detection reduces to one question: who wrote this file? Here's the ruleset, and the one place Wazuh's obvious answer doesn't work.</p>
+  <p class="dek">An editor extension plants an SSH backdoor across the Linux persistence surface — as an ordinary <code>node</code> process. The detection reduces to one question: who wrote this file? Here's the ruleset, and the one place Wazuh's obvious answer doesn't work.</p>
 
   <div class="byline">
     <div class="avatar">S</div>
@@ -40,15 +40,16 @@
 
   <p>That last detail is the whole story for a defender. The malicious actions are things a developer <em>also</em> does: add an SSH key, write a <code>~/.config</code> file, drop a systemd unit. What makes them malicious is <strong>who did them</strong>. A human running <code>ssh-keygen</code> and editing <code>authorized_keys</code> is Tuesday. A <strong>code editor's extension host</strong> writing to <code>authorized_keys</code> is an incident.</p>
 
-  <p>This post builds a Wazuh ruleset around that single question — <em>who wrote this file?</em> — walks every persistence vector the extension uses, and is honest about the one place Wazuh's obvious answer doesn't work.</p>
+  <p>This post builds a Wazuh ruleset around that single question — <em>who wrote this file?</em> — walks the persistence vectors this sample used (plus the adjacent ones the same watch catches for free), and is honest about the one place Wazuh's obvious answer doesn't work.</p>
 
   <h2>The persistence surface</h2>
-  <p>The loader doesn't rely on one trick; it sprays the whole Linux persistence surface so that losing any one foothold doesn't matter:</p>
+  <p>On Linux the loader doesn't rely on one trick; it uses several footholds so that losing any one doesn't matter. Microsoft's teardown documents four on Linux — the SSH key, the reverse tunnel, a hidden <code>~/.config</code> loader and a <code>@reboot</code> cron entry:</p>
 <pre><code>SSH authorized_keys backdoor key   ~/.ssh/authorized_keys              T1098.004
 Reverse SSH tunnel (exposes sshd)  ssh -R / autossh                   T1572
 Hidden loader + key                ~/.config/.smt, ~/.config/.smtk     T1564.001
-@reboot cron job                   /var/spool/cron/...                 T1053.003
-XDG autostart entry                ~/.config/autostart/*.desktop       T1547.013
+@reboot cron job                   /var/spool/cron/...                 T1053.003</code></pre>
+  <p>Because the recursive auditd watch below covers a whole subtree, the same ruleset also defends persistence vectors <em>this</em> sample didn't use but a loader like it easily could — for free:</p>
+<pre><code>XDG autostart entry                ~/.config/autostart/*.desktop       T1547.013
 systemd user unit                  ~/.config/systemd/user/*.service    T1543.002
 Shell rc hook                      ~/.bashrc, ~/.zshrc, ...             T1546.004</code></pre>
   <p>Every one of these is a file write. So the detection reduces to: <strong>watch the sensitive paths, and for each write, capture the process that did it.</strong></p>
@@ -59,7 +60,7 @@ Shell rc hook                      ~/.bashrc, ~/.zshrc, ...             T1546.00
     <li><strong>Wazuh 4.x all-in-one</strong> (indexer + manager + dashboard) on Ubuntu 24.04.</li>
     <li><strong>auditd</strong> installed and running — Wazuh's who-data and our syscall rules both depend on it.</li>
     <li>A throwaway <code>devuser</code> standing in for the developer's account. The manager self-monitors as agent <code>000</code>, so <code>devuser</code>'s home is under FIM.</li>
-    <li>A <strong>safe</strong> re-enactment script. It generates a fresh key pair on the host (the real attacker key is never used) and points the tunnel at <code>127.0.0.1</code>, so nothing leaves the machine. It mirrors the real sample's file names, key comment, crontab shape and <code>ssh</code> arguments, and crucially it runs <strong>inside a <code>node</code> process</strong>, exactly like an extension host.</li>
+    <li>A <strong>safe</strong> re-enactment script. It generates a fresh key pair on the host (the real attacker key is never used) and points the tunnel at <code>127.0.0.1</code>, so nothing leaves the machine. For the vectors the sample actually used it mirrors the real file names, key comment, crontab shape and <code>ssh</code> arguments (and uses illustrative names for the extra vectors the watch also covers); crucially it runs <strong>inside a <code>node</code> process</strong>, exactly like an extension host.</li>
   </ul>
 <pre><code>$ sudo -u devuser node simulate.js            # run the chain
 $ sudo -u devuser node simulate.js --cleanup  # undo it</code></pre>
@@ -86,7 +87,7 @@ $ sudo -u devuser node simulate.js --cleanup  # undo it</code></pre>
 &lt;/rule&gt;</code></pre>
   <p><strong>It never fires.</strong></p>
 
-  <p class="note"><strong>The gotcha: FIM who-data is not rule-matchable.</strong> The <code>syscheck.audit.*</code> block is rendered into the <em>alert JSON</em>, but it is not exposed to the <em>rule engine</em> as a matchable <code>&lt;field&gt;</code>. I confirmed this the hard way — three probe rules matching a catch-all <code>.+</code> under <code>syscheck.audit.process.name</code>, <code>audit.process.name</code> and <code>process.name</code>, and none of them matched. Wazuh's own stock ruleset never tries to match FIM who-data either. The data is for the analyst reading the alert, not for the correlation engine. If you've been copying field names out of the JSON and wondering why your FIM who-data rules are silent — that's why.</p>
+  <p class="note"><strong>The gotcha: FIM who-data is not rule-matchable.</strong> The <code>syscheck.audit.*</code> block is rendered into the <em>alert JSON</em>, but it is not exposed to the <em>rule engine</em> as a matchable <code>&lt;field&gt;</code>. I confirmed this the hard way — three probe rules matching a catch-all <code>.+</code> under <code>syscheck.audit.process.name</code>, <code>audit.process.name</code> and <code>process.name</code>, and none of them matched. Wazuh's own stock ruleset never tries to match FIM who-data either. The data is for the analyst reading the alert, not for the correlation engine. If you've been copying field names out of the JSON and wondering why your FIM who-data rules are silent — that's why. (Confirmed on Wazuh 4.x; treat it as version-specific behaviour.)</p>
 
   <h3 class="sans">Doing it properly: attribute the write with auditd</h3>
   <p>The fix is to stop relying on FIM for attribution and ask auditd directly. A syscall rule records <em>every</em> write under a subtree <strong>with the executing binary</strong>:</p>
@@ -133,7 +134,7 @@ $ sudo -u devuser node simulate.js --cleanup  # undo it</code></pre>
 100656  XDG autostart entry written by editor/Node process .../claude-code.desktop
 100657  systemd user unit written by editor/Node process .../claude-telemetry.service
 100658  shell rc file written by editor/Node process /home/devuser/.bashrc</code></pre>
-  <p>This is the part FIM who-data could never have done, even if it <em>were</em> matchable: the autostart and systemd-user directories weren't in the original FIM scope at all. The auditd subtree watch gets them for free.</p>
+  <p>This is the part FIM who-data could never have done, even if it <em>were</em> matchable: the autostart and systemd-user directories weren't in the original FIM scope at all. The auditd subtree watch gets them for free. Of these four, only the hidden <code>~/.config</code> drop (100655) is a vector Microsoft observed in this sample; the autostart, systemd-user and rc-hook rules — and the illustrative names <code>claude-code.desktop</code> and <code>claude-telemetry.service</code> — are adjacent vectors the watch covers, not IOCs seen in the wild.</p>
 
   <figure><img src="../assets/linux-eb-events.png" alt="Wazuh Threat Hunting table filtered on rule.groups:editor_backdoor" loading="lazy"><figcaption>The whole persistence chain in one view: filter <code>rule.groups:editor_backdoor</code>.</figcaption></figure>
 
@@ -141,7 +142,7 @@ $ sudo -u devuser node simulate.js --cleanup  # undo it</code></pre>
   <p>The tunnel is a process event, not a file event, so it comes from the ssh execute watch:</p>
 <pre><code>-w /usr/bin/ssh -p x -k eb_ssh_exec</code></pre>
   <p class="note"><strong>Lab note:</strong> <code>augenrules</code> refuses a <code>-w</code> watch on a path that doesn't exist (e.g. <code>autossh</code> when it isn't installed) and can reject the <em>entire</em> rules file. Either guard those lines or prefer the <code>-F dir=</code> syscall form.</p>
-  <p>The decoded <code>execve</code> arguments carry the tell-tale reverse-tunnel shape — <code>-R *:0:localhost:22</code>, <code>StrictHostKeyChecking=no</code>, a hidden <code>/tmp</code> identity file. The high-value signal, though, is the <strong>correlation</strong>: an <code>authorized_keys</code> change <em>followed by</em> a reverse tunnel within ten minutes is the full backdoor being armed.</p>
+  <p>The decoded <code>execve</code> arguments carry the tell-tale reverse-tunnel shape — <code>-R *:0:localhost:22</code>, <code>StrictHostKeyChecking=no</code>, and a hidden, short-lived identity file (the real sample names it with a <code>.stk_</code>+10-hex prefix). The high-value signal, though, is the <strong>correlation</strong>: an <code>authorized_keys</code> change <em>followed by</em> a reverse tunnel within ten minutes is the full backdoor being armed.</p>
 <pre><code>&lt;rule id="100690" level="15" timeframe="600"&gt;
   &lt;if_matched_group&gt;eb_authkeys&lt;/if_matched_group&gt;
   &lt;if_group&gt;eb_tunnel&lt;/if_group&gt;
