@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Everything said “active”: making Wazuh notice when Wazuh is broken · SAMspl0it</title>
+<meta name="description" content="Four real outages where every service reported active while events were lost. A self-monitoring pack for Wazuh 4.x that runs outside the manager, sends a canary through the whole pipeline, and alerts out-of-band — plus two systemd traps found by breaking a live manager on purpose.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="../">SAM<span class="dot">spl0it</span></a>
+    <nav><a href="../#posts">Posts</a><a href="../#projects">Projects</a></nav>
+    <span class="spacer"></span>
+    <a class="ghbtn" href="https://github.com/SAMsploit1">GitHub ↗</a>
+  </div>
+</header>
+
+<main>
+  <div class="kicker">Operations · Wazuh 4.x · Reliability</div>
+  <h1>Everything said “active”: making Wazuh notice when Wazuh is broken</h1>
+  <p class="dek">Four real outages where every service reported active while events were lost. A self-monitoring pack for Wazuh 4.x that runs outside the manager, sends a canary through the whole pipeline, and alerts out-of-band — plus two systemd traps found by breaking a live manager on purpose.</p>
+
+  <div class="byline">
+    <div class="avatar">S</div>
+    <div>
+      <div class="who">SAMspl0it</div>
+      <div class="meta"><time datetime="2026-11-06">2026-11-06</time> · 9 min read · tested on Wazuh 4.14.9</div>
+    </div>
+  </div>
+
+<p>The worst outage I've worked on didn't page anyone. On a production Wazuh
+deployment, the OOM killer took <code>wazuh-db</code>, and the cgroup kill took the rest
+of the manager with it: analysisd, remoted, logcollector, all of it. The
+indexer stayed up. The dashboard stayed up. Filebeat stayed up. The manager's
+systemd unit said <code>active</code>. For <strong>59.5 hours</strong> no event was analysed, and
+nothing anywhere said so.</p>
+<p>It wasn't the only one. On the same deployment:</p>
+<ul>
+<li>A watchdog built after that outage restarted the manager on schedule, raced
+  a daemon that crashed during shutdown, and left <code>wazuh-db</code> dead. 15 of 16
+  daemons were running and the unit said <code>active</code>. <strong>99.5% of events were
+  dropped for 5.5 hours.</strong></li>
+<li>The disk hit OpenSearch's flood-stage watermark. Every index went
+  <code>read_only_allow_delete</code>, and ISM couldn't run the deletes that would have
+  freed space. <strong>Two days with no ingestion</strong>, every service <code>active</code>, thousands
+  of agents connected.</li>
+<li>analysisd's queues were saturated by a <code>wazuh-db</code> bottleneck. <strong>About 83% of
+  events had been dropped for months.</strong> Indices kept growing, so ingestion
+  looked fine.</li>
+</ul>
+<p>The same two lessons came out of every one of them:</p>
+<ol>
+<li><strong>A service reporting <code>active</code> proves nothing.</strong></li>
+<li><strong>An alert that has to travel through the broken system never arrives.</strong></li>
+</ol>
+<p>Wazuh is good at watching other systems. Out of the box it's poor at watching
+itself, and that's an easy gap to fall into, because it's the system you'd use
+to watch for the problem. This post is about the pack I built to close it,
+<a href="https://github.com/SAMsploit1/shellcatch/tree/master/detections/wazuh-selfmon">wazuh-selfmon</a>,
+and about the two systemd surprises I hit when I broke a lab manager on
+purpose to prove it works.</p>
+<h2>Why the obvious fix doesn't work</h2>
+<p>The obvious fix is the one I built first on that production box: a health
+script that Wazuh runs itself, through a <code>&lt;localfile&gt;</code> block with
+<code>&lt;log_format&gt;command&lt;/log_format&gt;</code>, printing lines that custom rules turn into
+alerts. It works well for a <em>sick</em> manager: full disks, saturated queues,
+failed ISM steps.</p>
+<p>It's useless for a <em>dead</em> one. The script runs inside the manager's own
+logcollector. When the manager dies, the script dies with it, and even if it
+didn't, its output would go to an analysisd that isn't running. That is
+exactly why it didn't catch the 59.5-hour outage.</p>
+<p>So the design rules for wazuh-selfmon came straight from the failures:</p>
+<ul>
+<li><strong>Run outside the manager.</strong> A systemd timer of its own, not <code>Requires=</code> or
+  <code>BindsTo=</code> on <code>wazuh-manager</code>, so it runs when the manager is gone.</li>
+<li><strong>Check processes, not units.</strong> Find each <code>wazuh-*</code> daemon in <code>/proc</code>.
+  (Read <code>cmdline</code>, not <code>comm</code>: <code>comm</code> is cut at 15 characters, so
+  <code>wazuh-logcollector</code> shows up as <code>wazuh-logcollec</code>.)</li>
+<li><strong>Measure loss, not liveness.</strong> Diff analysisd's <code>events_received</code> and
+  <code>events_dropped</code> between runs. Read remoted's discards and the kernel's UDP
+  <code>RcvbufErrors</code>, because syslog over UDP loses packets without a trace.</li>
+<li><strong>Test the whole pipeline end to end.</strong> Don't infer that ingestion works
+  from services being up.</li>
+<li><strong>Have a second way out.</strong> Anything critical goes to a webhook directly, not
+  only through Wazuh.</li>
+</ul>
+<h2>The canary</h2>
+<p>That end-to-end check is the part I'd keep if I could keep only one.</p>
+<p>Every run, the probe writes a heartbeat record to its log. A level-3 rule
+matches it, which is deliberately high enough for it to be indexed. On the
+next run the probe searches <code>wazuh-alerts-*</code> for that exact canary ID. If it
+isn't there by the deadline, something between logcollector and the indexer is
+broken.</p>
+<p>The useful bit is the second question it asks: <strong>did the canary reach
+<code>alerts.json</code>?</strong> If it did, the manager did its job and the break is
+downstream, in filebeat or the indexer. If it didn't, the break is inside the
+manager. So the alert names the stage:</p>
+<blockquote>
+<p>Wazuh pipeline stalled: canary not indexed. The manager wrote it to
+alerts.json, so the break is after the manager: filebeat or the indexer.</p>
+</blockquote>
+<p>This is what catches the failure that's hardest to see. In the flood-stage
+outage, filebeat was still running after the indexer recovered. It was
+wedged, retrying, shipping nothing. Restarting it was what actually brought
+ingestion back. A filebeat that's <code>active</code> and doing nothing passes every
+liveness check there is. It doesn't pass this one.</p>
+<h2>Surprise one: the stock unit can't tell you the manager is dead</h2>
+<p>To reproduce the OOM outage I SIGKILLed every process in the manager on a lab
+running Wazuh 4.14.9:</p>
+<pre><code class="language-sh">systemctl kill -s KILL wazuh-manager
+systemctl is-active wazuh-manager   # -&gt; active
+</code></pre>
+<p>Every daemon gone, and the unit still said <code>active</code>. The reason is in the
+stock unit file:</p>
+<pre><code class="language-ini">[Service]
+Type=forking
+ExecStart=/usr/bin/env /var/ossec/bin/wazuh-control start
+KillMode=process
+RemainAfterExit=yes
+</code></pre>
+<p><code>wazuh-control start</code> launches the daemons and exits. With <code>Type=forking</code>
+and no PID file, systemd has no main process to track (<code>MainPID=0</code>), and
+<code>RemainAfterExit=yes</code> tells it to treat the unit as up regardless. It sits in
+<code>active (exited)</code> whatever happens to the daemons.</p>
+<p>The uncomfortable consequence: <strong><code>Restart=on-failure</code> can never fire on this
+unit.</strong> That was the top recommendation in my own incident write-up for the
+59.5-hour outage, and it's the advice you'll find for "my service died and
+didn't come back". Here it does nothing, because systemd never sees a
+failure. My first draft of the pack included a <code>Restart=on-failure</code>
+drop-in. I deleted it before publishing.</p>
+<p>wazuh-selfmon doesn't care what the unit says. With every daemon missing it
+reports:</p>
+<blockquote>
+<p>wazuh-manager is down: none of its daemons are running, yet the unit
+reports active.</p>
+</blockquote>
+<p>The webhook got that 5 seconds after the kill.</p>
+<h2>Surprise two: the watchdog that kills what it repairs</h2>
+<p>wazuh-selfmon can optionally repair a manager with missing daemons. It runs
+<code>wazuh-control start</code>, which only starts what isn't running. That's
+deliberate: a full restart is what hung on a crashing daemon in the 5.5-hour
+outage.</p>
+<p>The first test looked perfect. I killed <code>wazuh-db</code>, the probe ran
+<code>wazuh-control start</code>, waited, saw <code>wazuh-db</code> running, and logged <em>"all
+daemons are running again"</em>. Two minutes later the next run found <code>wazuh-db</code>
+missing and repaired it again. The manager's log explained it:</p>
+<pre><code>13:19:12 wazuh-db: INFO: Started (pid: 16656).
+13:19:25 wazuh-db: INFO: (1225): SIGNAL [(15)-(Terminated)] Received. Exit Cleaning...
+</code></pre>
+<p>Thirteen seconds after starting, something sent <code>wazuh-db</code> a SIGTERM. That
+something was systemd. The probe runs as a <code>Type=oneshot</code> service. Every
+process it starts, including a daemon launched by <code>wazuh-control start</code>,
+belongs to <em>the probe's</em> cgroup. When the oneshot exits, systemd cleans up its
+cgroup and terminates whatever is left. The repaired daemon was killed by the
+cleanup of the job that repaired it, after that job had already reported
+success.</p>
+<p>This trap applies to any watchdog run from a systemd service or timer that
+restarts something by calling its start script directly, not just this one.
+The fix is to put the repair command where systemd expects the daemons to be
+before running it:</p>
+<pre><code class="language-sh">sh -c 'echo $$ &gt; /sys/fs/cgroup/system.slice/wazuh-manager.service/cgroup.procs \
+       &amp;&amp; exec /var/ossec/bin/wazuh-control start'
+</code></pre>
+<p>After that, the restarted <code>wazuh-db</code> showed up in
+<code>0::/system.slice/wazuh-manager.service</code>, was still alive 30 seconds later,
+and the next run reported the recovery. If you run a home-grown Wazuh
+watchdog from a timer, check this.</p>
+<p>The pack also rate-limits repairs to three an hour, and a frequency rule
+fires if that limit is reached. Something that keeps killing your manager is a
+problem for a human, not for a restart loop. That rule fired for real during
+testing, from the three "successful" repairs above.</p>
+<h2>Getting alerts out of a dead system</h2>
+<p>Two pieces make sure the bad news arrives.</p>
+<p><strong>Out-of-band.</strong> Findings at or above a configurable severity are POSTed to a
+webhook: ntfy, a Slack-compatible endpoint, anything that takes a POST. It
+doesn't go through Wazuh, so it works when Wazuh doesn't. In the flood-stage
+test this mattered more than I expected. Under <code>read_only_allow_delete</code> the
+Wazuh alert <em>about</em> the write block can't be indexed either. Filebeat holds
+it until the block lifts. The webhook had it in seconds.</p>
+<p><strong>The backlog.</strong> The probe writes to a plain JSON log, and the manager reads
+it with:</p>
+<pre><code class="language-xml">&lt;localfile&gt;
+  &lt;log_format&gt;json&lt;/log_format&gt;
+  &lt;location&gt;/var/log/wazuh-selfmon/selfmon.json&lt;/location&gt;
+  &lt;only-future-events&gt;no&lt;/only-future-events&gt;
+&lt;/localfile&gt;
+</code></pre>
+<p><code>only-future-events no</code> makes logcollector read what was written while it was
+down. So the record of the outage isn't lost. The probe wrote "manager is
+down" at 13:21:39, the manager came back at 13:23:24, and the alert was in
+<code>alerts.json</code> at 13:23:32 carrying the original <code>observed_at</code>. Your SIEM ends
+up holding a record of its own outage, which helps when you have to write the
+incident report.</p>
+<p>For a host that's gone entirely, nothing on the host can help. Point
+<code>HEARTBEAT_URL</code> at an external dead man's switch (healthchecks.io, Uptime
+Kuma). The probe pings it after every run that found nothing critical.</p>
+<h2>Breaking it on purpose</h2>
+<p>Every rule runs through the manager's own logtest socket in a 22-case suite
+(22/22 on 4.14.9). That proves the rules match. It doesn't prove the probe
+notices anything, so I broke a live 4.14.9 all-in-one on Azure seven ways:</p>
+<table>
+<thead>
+<tr>
+<th>Fault injected</th>
+<th>The unit said</th>
+<th>What wazuh-selfmon reported</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>kill -9</code> wazuh-db</td>
+<td><code>active</code></td>
+<td>3 s: "unit active, daemons missing: wazuh-db"</td>
+</tr>
+<tr>
+<td>SIGKILL every manager daemon</td>
+<td><code>active (exited)</code></td>
+<td>5 s: "manager is down"; indexed 9 s after restart from the backlog</td>
+</tr>
+<tr>
+<td>filebeat frozen with SIGSTOP</td>
+<td><code>active</code></td>
+<td>at the canary deadline: "break is after the manager: filebeat or the indexer"</td>
+</tr>
+<tr>
+<td>flood-stage block (watermarks dropped to 20/25/30% at 31% disk)</td>
+<td>n/a</td>
+<td>22 indices blocked in 25 s; CRITICAL out-of-band at once, Wazuh alert delivered once the block lifted</td>
+</tr>
+<tr>
+<td>analysisd queue cut to 128, 11.6 M events in 60 s</td>
+<td><code>active</code></td>
+<td>"dropped 6,686,196 of 11,427,223 events (58.5%)"</td>
+</tr>
+<tr>
+<td>50,000 UDP datagrams into a 4 KB socket buffer</td>
+<td>n/a</td>
+<td>"kernel dropped 49,992 UDP datagrams"</td>
+</tr>
+<tr>
+<td>ISM rollover with no <code>rollover_alias</code></td>
+<td>n/a</td>
+<td>"1 indices have a failed ISM step; retention is not running"</td>
+</tr>
+</tbody>
+</table>
+<p>Each was detected, sent to the webhook, and reported again as RECOVERED when
+I undid it. The probe only writes when a check changes state, plus an hourly
+reminder while a problem lasts, so none of this is noisy when things are
+healthy.</p>
+<p>To reproduce the flood-stage outage I didn't fill the disk. I lowered the
+watermarks below current usage with a transient cluster setting, then set them
+back to <code>null</code>. OpenSearch released the block on its own five seconds later.
+It's a safe way to rehearse the incident on any test cluster.</p>
+<p>Two failures turned up that I didn't plan:</p>
+<ul>
+<li><strong>The canary caught my own bug.</strong> My first ruleset had the canary rule
+  shadowed by the generic "check OK" rule, a sibling-ordering mistake, so
+  canaries matched at level 0 and were never indexed. The next run reported
+  that the canary <em>"never reached alerts.json … or the rule is not loaded"</em>.
+  It was right.</li>
+<li><strong><code>unattended-upgrades</code> restarted the manager mid-test.</strong> The lab's first
+  boot in three days pulled a zlib security update, and <code>needrestart</code>
+  restarted every service linked against libz, <code>wazuh-manager</code> included. On a
+  production manager you probably want a person to make that decision:
+  exclude them in needrestart with
+  <code>$nrconf{override_rc}{qr(^wazuh-)} = 0;</code> in <code>/etc/needrestart/conf.d/</code>.</li>
+</ul>
+<h2>What it doesn't do</h2>
+<ul>
+<li><strong>It can't report a dead host.</strong> That needs the external heartbeat.</li>
+<li><strong>It's 4.x only.</strong> Wazuh 5.0 replaces analysisd with the new engine, and
+  the counters are different.</li>
+<li><strong>It watches one node.</strong> In a manager cluster, run it on every node.</li>
+<li><strong>It never restarts a running manager because of memory.</strong> It alerts on
+  wazuh-db RSS, but a manager whose wazuh-db keeps growing needs someone to
+  find out why. Restarting it on a threshold is how the 5.5-hour outage
+  started.</li>
+</ul>
+<h2>Try it</h2>
+<p>On a Wazuh 4.x manager, as root:</p>
+<pre><code class="language-sh">git clone https://github.com/SAMsploit1/shellcatch
+cd shellcatch/detections/wazuh-selfmon
+sh install.sh
+</code></pre>
+<p>The installer checks for rule-ID clashes, validates the ruleset with
+<code>wazuh-analysisd -t</code>, adds the <code>&lt;localfile&gt;</code> block (backing up <code>ossec.conf</code>),
+enables the timer and prints a dry run of every check. Then set <code>NOTIFY_URL</code>
+in <code>/etc/wazuh-selfmon.conf</code>. Without it, a dead manager still has no way to
+tell you.</p>
+<p>The probe is a single Python file using only the standard library. Read it
+before you run it as root on your SIEM. That's good advice for any pack,
+including this one.</p>
+
+  <div class="cta">
+    <h3 class="sans">More from the lab</h3>
+    <p>Detections, integrations, and write-ups on Wazuh and friends.</p>
+    <a class="ghbtn" href="../">All posts ↗</a>
+  </div>
+</main>
+
+<footer>
+  <p>Written by <strong>SAMspl0it</strong> · <a href="../">more posts</a>.
+  Wazuh and the Wazuh logo are trademarks of Wazuh Inc.; this is an independent community project.</p>
+</footer>
+</body>
+</html>
