@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Who wrote that key? Catching Linux persistence from a trojanized editor extension · SAMspl0it</title>
-<meta name="description" content="A trojanized editor extension plants an SSH backdoor as a node process. Attributing the writer with auditd — and why Wazuh FIM who-data can't do it.">
+<meta name="description" content="A trojanized editor extension plants an SSH backdoor as a node process. Attributing the writer with Wazuh FIM who-data and auditd — and the field-name trap that makes who-data rules look broken.">
 <meta property="og:title" content="Who wrote that key? Catching Linux persistence with Wazuh">
-<meta property="og:description" content="A trojanized editor extension plants an SSH backdoor as a node process. Attributing the writer with auditd — and why Wazuh FIM who-data can't do it.">
+<meta property="og:description" content="A trojanized editor extension plants an SSH backdoor as a node process. Attributing the writer with Wazuh FIM who-data and auditd — and the field-name trap that makes who-data rules look broken.">
 <meta property="og:type" content="article">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -65,7 +65,7 @@ Shell rc hook                      ~/.bashrc, ~/.zshrc, ...             T1546.00
 <pre><code>$ sudo -u devuser node simulate.js            # run the chain
 $ sudo -u devuser node simulate.js --cleanup  # undo it</code></pre>
 
-  <h2>Vector 1 — the SSH key, and the question Wazuh can't answer the obvious way</h2>
+  <h2>Vector 1 — the SSH key, and the field-name trap</h2>
   <p>Start with the crown jewel: a key appended to <code>authorized_keys</code>. FIM catches the change immediately. Here's the real alert (trimmed):</p>
 <pre><code>{
   "rule": { "id": "100600", "level": 8,
@@ -85,12 +85,21 @@ $ sudo -u devuser node simulate.js --cleanup  # undo it</code></pre>
   &lt;field name="audit.process.name" type="pcre2"&gt;(?i)(?:^|/)(?:node|code|cursor|...)$&lt;/field&gt;
   &lt;description&gt;authorized_keys written by an editor/Node process&lt;/description&gt;
 &lt;/rule&gt;</code></pre>
-  <p><strong>It never fires.</strong></p>
+  <p><strong>It never fires.</strong> The reason isn't what I first thought, though.</p>
 
-  <p class="note"><strong>The gotcha: FIM who-data is not rule-matchable.</strong> The <code>syscheck.audit.*</code> block is rendered into the <em>alert JSON</em>, but it is not exposed to the <em>rule engine</em> as a matchable <code>&lt;field&gt;</code>. I confirmed this the hard way — three probe rules matching a catch-all <code>.+</code> under <code>syscheck.audit.process.name</code>, <code>audit.process.name</code> and <code>process.name</code>, and none of them matched. Wazuh's own stock ruleset never tries to match FIM who-data either. The data is for the analyst reading the alert, not for the correlation engine. If you've been copying field names out of the JSON and wondering why your FIM who-data rules are silent — that's why. (Confirmed on Wazuh 4.x; treat it as version-specific behaviour.)</p>
+  <p class="note"><strong>The gotcha: who-data is rule-matchable, just not under the names in the alert JSON.</strong> The FIM decoder registers each who-data value under a short, flat field name. The dotted path you see in the alert is not that name. So <code>syscheck.audit.process.name</code> is <code>process_name</code> to the rule engine, and the same goes for <code>parent_name</code>, <code>effective_name</code>, <code>audit_name</code> (the login user), <code>cwd</code>, <code>ppid</code> and the rest. The mapping is in <code>src/analysisd/decoders/syscheck.c</code>. My three probe rules used <code>syscheck.audit.process.name</code>, <code>audit.process.name</code> and <code>process.name</code>. Those are all the wrong names, so all three stayed silent, and I wrongly concluded that who-data couldn't be matched. A reader reproduced the probes on 4.14.x and confirmed this: the dotted names stay silent, but a chain on <code>process_name</code> → <code>effective_name</code> → <code>audit_name</code> → <code>parent_name</code> fires all the way down. Thanks for the correction. If your FIM who-data rules are silent, check the field names before you give up on who-data.</p>
 
-  <h3 class="sans">Doing it properly: attribute the write with auditd</h3>
-  <p>The fix is to stop relying on FIM for attribution and ask auditd directly. A syscall rule records <em>every</em> write under a subtree <strong>with the executing binary</strong>:</p>
+  <p>So the who-data version of the rule is simply:</p>
+<pre><code>&lt;rule id="100601" level="13"&gt;
+  &lt;if_sid&gt;100600&lt;/if_sid&gt;
+  &lt;field name="process_name" type="pcre2"&gt;(?i)(?:^|/)(?:node|nodejs|bun|deno|electron|cursor|code|codium|windsurf)$&lt;/field&gt;
+  &lt;description&gt;Editor backdoor: $(file) written by an editor/Node process $(process_name) (login user: $(audit_name))&lt;/description&gt;
+  &lt;mitre&gt;&lt;id&gt;T1098.004&lt;/id&gt;&lt;id&gt;T1195.002&lt;/id&gt;&lt;/mitre&gt;
+&lt;/rule&gt;</code></pre>
+  <p>This works for any path that is already under FIM with <code>whodata="yes"</code>. The catch is the <em>scope</em>: who-data only sees the directories you put in FIM. In this lab that was <code>~/.ssh</code> and a handful of files, and the persistence surface is wider than that.</p>
+
+  <h3 class="sans">Widening the net: attribute every write with auditd</h3>
+  <p>To cover the whole surface without listing every path in FIM, ask auditd directly. A syscall rule records <em>every</em> write under a subtree <strong>with the executing binary</strong>:</p>
 <pre><code># auditd/62-eb-filewrite.rules
 -a always,exit -F arch=b64 -F dir=/home -F perm=wa -F auid&gt;=1000 -F auid!=unset -k eb_file_write
 -a always,exit -F arch=b64 -F dir=/root -F perm=wa -k eb_file_write
@@ -134,7 +143,7 @@ $ sudo -u devuser node simulate.js --cleanup  # undo it</code></pre>
 100656  XDG autostart entry written by editor/Node process .../claude-code.desktop
 100657  systemd user unit written by editor/Node process .../claude-telemetry.service
 100658  shell rc file written by editor/Node process /home/devuser/.bashrc</code></pre>
-  <p>This is the part FIM who-data could never have done, even if it <em>were</em> matchable: the autostart and systemd-user directories weren't in the original FIM scope at all. The auditd subtree watch gets them for free. Of these four, only the hidden <code>~/.config</code> drop (100655) is a vector Microsoft observed in this sample; the autostart, systemd-user and rc-hook rules — and the illustrative names <code>claude-code.desktop</code> and <code>claude-telemetry.service</code> — are adjacent vectors the watch covers, not IOCs seen in the wild.</p>
+  <p>This is where the auditd watch earns its place next to FIM who-data. The autostart and systemd-user directories weren't in the original FIM scope at all, so who-data never saw those writes. The auditd subtree watch gets them for free. (You could add each directory to FIM with <code>whodata="yes"</code> and match <code>process_name</code> instead. That works, but you have to know every path in advance.) Of these four, only the hidden <code>~/.config</code> drop (100655) is a vector Microsoft observed in this sample; the autostart, systemd-user and rc-hook rules — and the illustrative names <code>claude-code.desktop</code> and <code>claude-telemetry.service</code> — are adjacent vectors the watch covers, not IOCs seen in the wild.</p>
 
   <figure><img src="../assets/linux-eb-events.png" alt="Wazuh Threat Hunting table filtered on rule.groups:editor_backdoor" loading="lazy"><figcaption>The whole persistence chain in one view: filter <code>rule.groups:editor_backdoor</code>.</figcaption></figure>
 
@@ -159,7 +168,7 @@ $ sudo -u devuser node simulate.js --cleanup  # undo it</code></pre>
 
   <h2>Takeaways</h2>
   <ol>
-    <li><strong>For "which process touched this file" on Linux, reach for auditd <code>-F dir=</code> syscall rules, not FIM who-data.</strong> FIM tells you a file changed and shows the writer to a human; auditd lets the <em>engine</em> act on the writer.</li>
+    <li><strong>FIM who-data is rule-matchable, as long as you use the decoder's flat field names</strong> (<code>process_name</code>, <code>parent_name</code>, <code>audit_name</code> and so on), not the dotted paths from the alert JSON. For writer attribution across a wide, partly unknown surface, auditd <code>-F dir=</code> syscall rules with <code>audit.exe</code> cover more ground. Use who-data for the paths you already watch, and auditd for the rest.</li>
     <li><strong>A single recursive subtree watch replaces a pile of per-path rules.</strong> Match the location in <code>audit.file.name</code> and the actor in <code>audit.exe</code>, and one auditd rule covers the whole persistence surface.</li>
     <li><strong>Detect creation by existence/attribution, correlate the kill chain.</strong> File-content diffs miss the first write; the alert you page on is the correlation (key added → tunnel up), not any single file event.</li>
     <li><strong>The behavioural line is the clean one.</strong> You can't blocklist developers adding SSH keys. You <em>can</em> alert when a code editor's runtime does — that boundary is what turned a pile of benign-looking file writes into one level-15 incident.</li>
