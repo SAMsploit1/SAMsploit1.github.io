@@ -34,6 +34,12 @@
   <!-- New post: copy posts/_template.html to posts/<slug>.html, then add an <li> at the top of this list. -->
   <ul class="posts">
     <li>
+      <div class="pk">Detection Engineering · MCP · Wazuh 4.14</div>
+      <h3 class="sans"><a href="posts/mcp-wazuh-evidence.html">An MCP tool accessed a secret—what can Wazuh actually prove?</a></h3>
+      <p>Four real tool actions, eight passing rule tests, and the evidence gap a green test result cannot close. A small reproducible lab with dummy secrets, negative controls, and explicit limits.</p>
+      <div class="meta">2026-11-13 · 9 min read</div>
+    </li>
+    <li>
       <div class="pk">Operations · Wazuh 4.x · Reliability</div>
       <h3 class="sans"><a href="posts/wazuh-selfmon.html">Everything said “active”: making Wazuh notice when Wazuh is broken</a></h3>
       <p>Four outages where every service was up and events were lost. A self-monitoring pack with an end-to-end canary and out-of-band alerts, tested by breaking a live manager seven ways — and why <code>Restart=on-failure</code> can never fire on the stock unit.</p>
@@ -72,6 +78,10 @@
   </ul>
 
   <h2 class="section" id="projects">Projects</h2>
+  <a class="proj" href="https://github.com/SAMsploit1/mcp-wazuh-lab">
+    <div class="n">mcp-wazuh-lab <span class="s">Open source</span></div>
+    <p>Isolated MCP tool scenarios, Wazuh rules, and eight regression cases. Includes recorded results and the limits of application-generated evidence.</p>
+  </a>
   <a class="proj" href="https://github.com/SAMsploit1/shellcatch">
     <div class="n">shellcatch <span class="s">Open source</span></div>
     <p>Web-to-shell Wazuh ruleset with a vulnerable Docker lab and a test suite that runs against a live logtest engine.</p>

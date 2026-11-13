@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>An MCP tool accessed a secret—what can Wazuh actually prove? · SAMspl0it</title>
+<meta name="description" content="A reproducible MCP lab, eight Wazuh rule tests, and the trust boundary between application logs and independent evidence.">
+<link rel="canonical" href="https://samsploit1.github.io/posts/mcp-wazuh-evidence.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="An MCP tool accessed a secret—what can Wazuh actually prove?">
+<meta property="og:description" content="A reproducible MCP lab, eight Wazuh rule tests, and the trust boundary between application logs and independent evidence.">
+<meta property="og:url" content="https://samsploit1.github.io/posts/mcp-wazuh-evidence.html">
+<meta property="article:published_time" content="2026-11-13">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="../">SAM<span class="dot">spl0it</span></a>
+    <nav><a href="../#posts">Posts</a><a href="../#projects">Projects</a></nav>
+    <span class="spacer"></span>
+    <a class="ghbtn" href="https://github.com/SAMsploit1">GitHub ↗</a>
+  </div>
+</header>
+
+<main>
+  <div class="kicker">Detection Engineering · MCP · Wazuh 4.14</div>
+  <h1>An MCP tool accessed a secret—what can Wazuh actually prove?</h1>
+  <p class="dek">A reproducible MCP lab, eight Wazuh rule tests, and the trust boundary between application logs and independent evidence.</p>
+
+  <div class="byline">
+    <div class="avatar">S</div>
+    <div>
+      <div class="who">SAMspl0it</div>
+      <div class="meta"><time datetime="2026-11-13">2026-11-13</time> · 9 min read</div>
+    </div>
+  </div>
+
+  <p>A tool reads a credential file. A child shell appears. Some data leaves the process. Those are familiar detection problems, even when the process belongs to an MCP server. The harder question is where the evidence comes from.</p>
+  <p>I built a small lab to follow that question through Wazuh: execute a few real tool actions, record structured events, and feed them into the actual rule engine. Three custom detections matched, and five negative controls stayed quiet. That is a useful result, with a boundary: the server generated the evidence about its own behavior.</p>
+  <p class="note"><strong>Scope:</strong> this is the first stage of an MCP detection lab, tested on Wazuh 4.14.10. It validates application-event decoding and rule matching. Independent Linux telemetry and end-to-end alert delivery remain untested.</p>
+
+  <h2>Why start with MCP tools?</h2>
+  <p>MCP lets clients discover and invoke tools. In its <a href="https://modelcontextprotocol.io/specification/2025-11-25/basic/transports">stdio transport</a>, a client launches a server subprocess and exchanges JSON-RPC messages over standard input and output. The server still runs ordinary code with the permissions of its execution environment.</p>
+  <p>The security question becomes concrete when a tool can read files or start processes. Microsoft’s June 2026 <a href="https://www.microsoft.com/en-us/security/blog/2026/06/30/securing-ai-agents-ai-tools-move-from-reading-acting/">investigation of MCP tool poisoning</a> describes why moving from generated text to actions changes the impact of abuse. This lab starts at the action boundary. A deterministic client calls the tools directly; there is no model, poisoned prompt, or paid API.</p>
+  <p>That choice makes the experiment reproducible. It also limits the claim: this does not demonstrate that an attacker can persuade an AI agent to make those calls.</p>
+
+  <h2>The smallest useful experiment</h2>
+  <p>The repository has two containers. One runs a minimal Python MCP fixture and its test client. The other runs the Wazuh database and analysis daemons so <code>wazuh-logtest</code> can evaluate events. There is no indexer, dashboard, or enrolled agent.</p>
+<pre><code>Deterministic MCP client
+        ↓ tools/call over stdio
+Python fixture → file read / child shell / loopback POST
+        ↓ application-written JSON events
+Host test runner → wazuh-logtest → expected vs. observed rule IDs</code></pre>
+  <p>Both containers use <code>network_mode: none</code>. The fixture’s HTTP receiver binds to <code>127.0.0.1:8765</code> inside its own container; loopback still works. No port is published. The fixture can access its lab code, temporary files, and evidence directory, rather than the host’s credential directories.</p>
+  <p>The four tool calls perform these actions:</p>
+  <table>
+    <caption>Executed fixture scenarios</caption>
+    <thead><tr><th scope="col">Tool</th><th scope="col">Actual behavior</th><th scope="col">Expected custom alert</th></tr></thead>
+    <tbody>
+      <tr><td><code>read_public</code></td><td>Read a generated public text file.</td><td>None</td></tr>
+      <tr><td><code>read_dummy_secret</code></td><td>Read a generated file containing a fixed fake token.</td><td><code>110501</code></td></tr>
+      <tr><td><code>spawn_shell</code></td><td>Run <code>/bin/sh -c 'printf lab-child-process'</code>.</td><td><code>110502</code></td></tr>
+      <tr><td><code>send_dummy</code></td><td>POST the fake token to the local receiver, which checks its contents.</td><td><code>110503</code></td></tr>
+    </tbody>
+  </table>
+  <p>The paths, command, and destination are fixed in the fixture. This gives us controlled behavior without real secrets or an external collection endpoint. The file is designated sensitive by the fixture; reading it does not cross an operating-system permission boundary.</p>
+
+  <h2>One event, one explicit claim</h2>
+  <p>After the dummy-secret read succeeds, the application writes this event:</p>
+<pre><code>{
+  "integration": "mcp_lab",
+  "mcp_action": "file_read",
+  "tool": "read_dummy_secret",
+  "path": "/tmp/mcp-evidence-lab/dummy-secret.txt",
+  "sensitive": "yes"
+}</code></pre>
+  <p>The stock JSON decoder extracts these fields. A level-zero parent rule scopes the custom rules to this integration; the child rule requires both a file-read action and the explicit sensitivity label.</p>
+<pre><code>&lt;rule id="110500" level="0"&gt;
+  &lt;decoded_as&gt;json&lt;/decoded_as&gt;
+  &lt;field name="integration"&gt;^mcp_lab$&lt;/field&gt;
+  &lt;description&gt;MCP lab structured application event&lt;/description&gt;
+&lt;/rule&gt;
+
+&lt;rule id="110501" level="8"&gt;
+  &lt;if_sid&gt;110500&lt;/if_sid&gt;
+  &lt;field name="mcp_action"&gt;^file_read$&lt;/field&gt;
+  &lt;field name="sensitive"&gt;^yes$&lt;/field&gt;
+  &lt;description&gt;MCP lab tool read a designated dummy sensitive file&lt;/description&gt;
+&lt;/rule&gt;</code></pre>
+  <p>The full file wraps these rules in a group and adds the shell and transfer rules. The shell rule checks a reported executable of <code>/bin/sh</code> or <code>/bin/bash</code>. The transfer rule checks <code>network_send</code> plus <code>sensitive=yes</code>. Those are fixture-specific policies, not general judgments that shells or network activity are malicious.</p>
+
+  <h2>The field-name trap the engine caught</h2>
+  <p>The first event schema used <code>action</code>. Writing <code>&lt;field name="action"&gt;</code> in the child rule caused the analysis daemon to reject the rules:</p>
+<pre><code>ERROR: Failure to read rule 110501. Field 'action' is static.</code></pre>
+  <p>Wazuh treats that name as a static field, so it cannot be matched through that dynamic-field expression. I renamed the fixture field to <code>mcp_action</code> and reran the engine. This was a schema change, not a regex fix. Testing only the Python JSON output would have missed the failure.</p>
+  <p>The minimal container also needed more than the logtest executable. It restores the image’s packaged configuration and starts the database and analysis daemons. The runner waits for the logtest socket before submitting cases. That startup is specific to this stripped-down lab; it is not a replacement deployment recipe for a production manager.</p>
+
+  <h2>Eight cases, with their observed results</h2>
+  <p>The client executes the four scenarios first. The verification script reads their fresh events, adds four constructed negative controls, and submits each case to Wazuh. It checks the final rule ID against the expected outcome and saves the raw output.</p>
+  <table>
+    <caption>Recorded run, 13 November 2026 · Wazuh 4.14.10</caption>
+    <thead><tr><th scope="col">Case</th><th scope="col">Observed rule</th><th scope="col">Result</th></tr></thead>
+    <tbody>
+      <tr><td>Read public file</td><td><code>110500</code>, level 0</td><td>Pass: no custom alert</td></tr>
+      <tr><td>Read dummy secret</td><td><code>110501</code></td><td>Pass</td></tr>
+      <tr><td>Start shell</td><td><code>110502</code></td><td>Pass</td></tr>
+      <tr><td>Send dummy data</td><td><code>110503</code></td><td>Pass</td></tr>
+      <tr><td>Same sensitive-read fields, different integration</td><td>No rule reported</td><td>Pass: no custom alert</td></tr>
+      <tr><td>Ordinary Python process event</td><td><code>110500</code>, level 0</td><td>Pass: no custom alert</td></tr>
+      <tr><td>Transfer event with <code>sensitive=no</code></td><td><code>110500</code>, level 0</td><td>Pass: no custom alert</td></tr>
+      <tr><td>File-read event missing sensitivity</td><td><code>110500</code>, level 0</td><td>Pass: no custom alert</td></tr>
+    </tbody>
+  </table>
+  <p>All eight assertions passed. “No custom alert” means none of the three child detections matched. The level-zero parent can still appear in logtest output. These five controls test specific boundaries; they are not a measured production false-positive rate.</p>
+  <p>For the dummy-secret read, the engine reported:</p>
+<pre><code>**Phase 2: Completed decoding.
+    name: 'json'
+    integration: 'mcp_lab'
+    mcp_action: 'file_read'
+    sensitive: 'yes'
+
+**Phase 3: Completed filtering (rules).
+    id: '110501'
+    level: '8'
+    description: 'MCP lab tool read a designated dummy sensitive file'
+**Alert to be generated.</code></pre>
+  <p>That last line belongs to the test engine. It establishes that the event matches an alerting rule. It does not establish that an agent collected the event, a manager ingested it, or a dashboard displayed an alert. The <a href="https://documentation.wazuh.com/current/user-manual/ruleset/testing.html">Wazuh logtest documentation</a> explains the tool’s decoding and rule-testing role.</p>
+  <p>The <a href="https://github.com/SAMsploit1/mcp-wazuh-lab/tree/main/results/2026-11-13">recorded run</a> includes the four generated events, all eight raw logtest outputs, and the machine-readable expected-versus-observed results.</p>
+
+  <h2>The trust boundary that remains</h2>
+  <p>The same process performs each action and writes the event describing it. A compromised server could suppress the event, change <code>sensitive</code> to <code>no</code>, or report a different executable. Wazuh would then evaluate incomplete or false input correctly.</p>
+  <p>There are other gaps. The events have no request identifier, timestamp, PID, parent PID, or user identity. The sensitivity label is not independently derived. The loopback POST demonstrates a local transfer, not internet exfiltration. And an executable name by itself says little about whether its invocation was authorized.</p>
+  <p>This makes the next experiment clear: compare these application events with independently collected Linux file-access and process-execution records. Preserve the server identity and process ancestry, connect them to the tool request where possible, and repeat the actions with application logging disabled. That would test whether visibility survives the loss of the server’s own account of events.</p>
+  <p>That experiment has not run yet. I will evaluate the collection method separately rather than assuming auditd works inside an ordinary container or adding privileged mode to make the example appear complete.</p>
+
+  <h2>Reproduce it without a cloud account</h2>
+  <p>You need Docker Compose and Python 3 on the host. The images are pinned by digest. The Wazuh image runs as amd64, so Apple Silicon uses emulation; this run used an M4 MacBook Air with 16 GB RAM.</p>
+<pre><code>git clone https://github.com/SAMsploit1/mcp-wazuh-lab.git
+cd mcp-wazuh-lab
+sh scripts/run.sh</code></pre>
+  <p>The runner starts Wazuh, waits for the socket, executes the fixture, verifies the cases, and removes the lab containers on exit. It writes generated evidence under <code>evidence/</code>, which is excluded from Git. If the runner is killed before cleanup, run <code>docker compose down</code> from the repository directory.</p>
+  <p>The Wazuh container is limited to 1.5 CPUs and 2 GiB RAM; the fixture gets 0.5 CPU and 256 MiB. A post-test snapshot showed Wazuh at 81.38 MiB and 0.15% CPU. That is an idle snapshot, not a peak or a capacity recommendation, and it excludes Docker’s Linux VM overhead. The images remain cached after cleanup.</p>
+  <p>There are no paid API calls or cloud resources in this experiment. Image downloads still need disk space and bandwidth, and shutting down the Compose project does not quit Docker Desktop.</p>
+
+  <div class="cta">
+    <h3 class="sans">Run it, inspect it, challenge the evidence</h3>
+    <p>The repository contains the fixture, rules, regression runner, and recorded results. The next milestone is independent Linux telemetry and an end-to-end ingestion test.</p>
+    <a class="ghbtn" href="https://github.com/SAMsploit1/mcp-wazuh-lab">MCP Wazuh lab on GitHub ↗</a>
+  </div>
+
+</main>
+
+<footer>
+  <p>Written by <strong>SAMspl0it</strong> · <a href="../">more posts</a>.
+  Wazuh and the Wazuh logo are trademarks of Wazuh Inc.; this is an independent community project.</p>
+</footer>
+</body>
+</html>
