@@ -117,18 +117,16 @@ Test runner → wazuh-logtest → expected and observed rule IDs</code></pre>
   </table>
   <p>All eight test cases passed. “No custom alert” means that none of the three alerting child rules matched; the level-zero parent rule may still appear in the output. The five negative controls check specific matching conditions and do not establish a production false-positive rate.</p>
   <p>For the dummy-secret read, the engine reported:</p>
-<pre><code>**Phase 2: Completed decoding.
-    name: 'json'
-    integration: 'mcp_lab'
-    mcp_action: 'file_read'
-    sensitive: 'yes'
-
-**Phase 3: Completed filtering (rules).
-    id: '110501'
-    level: '8'
-    description: 'MCP lab tool read a designated dummy sensitive file'
-**Alert to be generated.</code></pre>
+<figure>
+    <a href="../assets/mcp-wazuh/logtest-sensitive-read.jpg"><img src="../assets/mcp-wazuh/logtest-sensitive-read.jpg" alt="Recorded Wazuh logtest output: JSON fields decoded and rule 110501 matched at level 8 for the dummy sensitive-file read." width="1280" height="869" loading="lazy"></a>
+    <figcaption>Figure 1. The dummy sensitive-file read matches rule 110501 at level 8. Screenshot of the saved, unmodified logtest output displayed in a static evidence viewer.</figcaption>
+  </figure>
   <p>The message “Alert to be generated” confirms that the supplied event matches an alerting rule. It does not verify collection by an agent, ingestion by a running manager, or display in the Wazuh dashboard. The <a href="https://documentation.wazuh.com/current/user-manual/ruleset/testing.html">Wazuh logtest documentation</a> explains the tool’s decoding and rule-testing role.</p>
+  <p>The public-file read provides a comparison. It is decoded successfully and matches only the level-zero grouping rule. The sensitive-file detection does not match, which is the expected outcome for this control.</p>
+  <figure>
+    <a href="../assets/mcp-wazuh/logtest-public-read.jpg"><img src="../assets/mcp-wazuh/logtest-public-read.jpg" alt="Recorded Wazuh logtest output: the public-file read matches grouping rule 110500 at level 0 without a custom alert." width="1280" height="845" loading="lazy"></a>
+    <figcaption>Figure 2. The public-file read remains at rule 110500, level 0. Both figures show rule-test output from the lab rerun, rather than dashboard alerts.</figcaption>
+  </figure>
   <p>The <a href="https://github.com/SAMsploit1/mcp-wazuh-lab/tree/main/results/2026-11-13">recorded run</a> includes the four generated events, all eight raw logtest outputs, and the machine-readable expected-versus-observed results.</p>
 
   <h2>Interpreting the evidence and its limitations</h2>
