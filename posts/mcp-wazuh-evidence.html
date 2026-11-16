@@ -4,13 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Evaluating MCP tool activity with Wazuh · SAMspl0it</title>
-<meta name="description" content="A practical walkthrough of MCP activity logging, custom Wazuh rules, and detection validation using eight reproducible test cases.">
+<meta name="description" content="A practical walkthrough of MCP telemetry, Wazuh path-based rules, ATT&CK mappings, and explicit validation limits.">
 <link rel="canonical" href="https://samsploit1.github.io/posts/mcp-wazuh-evidence.html">
 <meta property="og:type" content="article">
 <meta property="og:title" content="Evaluating MCP tool activity with Wazuh">
-<meta property="og:description" content="A practical walkthrough of MCP activity logging, custom Wazuh rules, and detection validation using eight reproducible test cases.">
+<meta property="og:description" content="A practical walkthrough of MCP telemetry, Wazuh path-based rules, ATT&CK mappings, and explicit validation limits.">
 <meta property="og:url" content="https://samsploit1.github.io/posts/mcp-wazuh-evidence.html">
 <meta property="article:published_time" content="2026-11-13">
+<meta property="article:modified_time" content="2026-11-16">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -29,24 +30,42 @@
 <main>
   <div class="kicker">Detection Engineering · MCP · Wazuh 4.14</div>
   <h1>Evaluating MCP tool activity with Wazuh</h1>
-  <p class="dek">A practical walkthrough of MCP activity logging, custom Wazuh rules, and detection validation using eight reproducible test cases.</p>
+  <p class="dek">A practical walkthrough of MCP telemetry, Wazuh path-based rules, ATT&CK mappings, and explicit validation limits.</p>
 
   <div class="byline">
     <div class="avatar">S</div>
     <div>
       <div class="who">SAMspl0it</div>
-      <div class="meta"><time datetime="2026-11-13">2026-11-13</time> · 7 min read</div>
+      <div class="meta"><time datetime="2026-11-13">2026-11-13</time> · Updated <time datetime="2026-11-16">2026-11-16</time> · 10 min read</div>
     </div>
   </div>
 
   <p>AI applications use the Model Context Protocol (MCP) to connect to tools that can read files, execute commands, and interact with other services. These capabilities create activity that security teams need to understand and monitor.</p>
-  <p>This write-up demonstrates how to represent MCP tool activity as structured logs and evaluate it with custom Wazuh detection rules. The lab performs four controlled actions and validates eight test cases: three expected detections and five cases that should not trigger the custom alerts.</p>
-  <p class="note"><strong>Validation scope:</strong> the lab uses Wazuh 4.14.10 to test application-log decoding and rule matching. Linux host telemetry, agent collection, and end-to-end alert delivery are outside the validated scope.</p>
+  <p>This write-up demonstrates how to represent MCP tool activity as structured logs and evaluate it with custom Wazuh detection rules. The original run performed four controlled actions and validated eight test cases: three expected detections and five controls. The reviewer revision below moves path classification into Wazuh and expands process coverage. A fresh 70-case Wazuh run passed in a disposable GitHub Codespace on 16 November.</p>
+  <p class="note"><strong>Validation scope:</strong> the lab uses Wazuh 4.14.10 to test application-log decoding and rule matching. The recorded eight-case run applies to the original rules. The revised rules passed 70/70 cases in Wazuh 4.14.10: 48 expected detections and 22 negative controls. Linux host telemetry, agent collection, and end-to-end alert delivery remain outside the validated scope.</p>
 
   <h2>Understanding MCP tool activity</h2>
   <p>MCP is a protocol through which an application discovers and calls tools provided by a server. In its <a href="https://modelcontextprotocol.io/specification/2025-11-25/basic/transports">stdio transport</a>, a client launches a server subprocess and exchanges JSON-RPC messages over standard input and output. Tool operations execute as normal application code, subject to the permissions of the server process. A process is a running instance of a program; its permissions determine which files and system operations it can access.</p>
   <p>File access and process execution are relevant to security monitoring because a tool may perform actions beyond its intended purpose. Microsoft’s June 2026 <a href="https://www.microsoft.com/en-us/security/blog/2026/06/30/securing-ai-agents-ai-tools-move-from-reading-acting/">investigation of MCP tool poisoning</a> describes why moving from generated text to actions changes the impact of abuse. In this lab, a scripted client invokes each tool directly, producing repeatable actions without involving a language model.</p>
   <p>The experiment evaluates the resulting activity and its logs. It does not test prompt injection or demonstrate that an attacker can cause an AI agent to invoke a tool.</p>
+
+  <h2>Getting telemetry from real MCP deployments</h2>
+  <p>Real MCP deployments do not automatically emit <code>{"integration":"mcp_lab",…}</code>. This is the lab’s normalized schema. Choose a collection point, inspect what it actually records, and adapt those records before applying the rules:</p>
+  <ul>
+    <li><strong>Server SDK middleware or tool wrappers:</strong> wrap registered tool handlers and instrument completed file reads, process starts, and sends. Record request ID, server/tool identity and outcome. A requested file path in <code>tools/call</code> does not prove a read happened. For stdio servers, use a separate JSON-lines file or stderr; stdout must remain dedicated to MCP JSON-RPC messages.</li>
+    <li><strong>A logging proxy or gateway:</strong> observe <code>tools/call</code> requests and responses on the actual transport path. Remote deployments may use a gateway; local stdio servers need a subprocess wrapper. Such logs show protocol activity, not every file access or child process inside the server. Establish completed operations through server instrumentation or host telemetry.</li>
+    <li><strong>Desktop and IDE client logs:</strong> inspect the client’s documented MCP/debug-log settings and log directory, then make a harmless call to check the available fields. Formats and paths vary; some clients record only transport errors. Normalize the available metadata without presenting a request as proof of execution.</li>
+  </ul>
+  <p>Protect and rotate logs, restrict readers, and omit file contents, tool results, secrets, and authorization headers. Where available, retain timestamps, request IDs, server instance, PID and user identity for correlation. These are deployment recommendations; the minimal fixture does not populate all these fields.</p>
+  <p>For a completed operation, a normalizer can produce metadata such as this illustrative event:</p>
+<pre><code>{"integration":"mcp_lab","mcp_action":"file_read","path":"/home/example/.ssh/id_ed25519","tool":"read_file","request_id":"example-42"}</code></pre>
+  <p>The marker routes events into the rule group; it does not authenticate their source. Use canonical absolute paths resolved at the operation boundary, including symlinks and <code>..</code>. Emit <code>executable</code> as a resolved absolute executable and <code>argument1</code> as argv[1], rather than parsing an arbitrary shell string. For a transfer, report <code>source_path</code> only when the collector knows which file supplied the bytes. A prior read request alone is insufficient provenance.</p>
+  <p>To collect a normalized JSON-lines file with a Wazuh agent, an example <code>ossec.conf</code> input is:</p>
+<pre><code>&lt;localfile&gt;
+  &lt;log_format&gt;json&lt;/log_format&gt;
+  &lt;location&gt;/var/log/mcp/activity.jsonl&lt;/location&gt;
+&lt;/localfile&gt;</code></pre>
+  <p>Install the custom rules on the manager under <code>/var/ossec/etc/rules/</code>, check that IDs <code>110500–110505</code> are available, and test representative records with <code>wazuh-logtest</code>. Validate configuration and restart the affected agent/manager through your normal change process. Verify file permissions, collection, ingestion and the resulting alert using a benign test event. This real-deployment collection path has not been tested by the lab. The repository’s <a href="https://github.com/SAMsploit1/mcp-wazuh-lab/blob/main/TELEMETRY.md">telemetry guide</a> explains the schema and remaining gaps.</p>
 
   <h2>Lab architecture and test scenarios</h2>
   <p>The lab contains two containers. The first runs a small Python MCP test server and its client. The second runs the Wazuh database and analysis services, allowing <code>wazuh-logtest</code> to evaluate events. An indexer, dashboard, and enrolled agent are not required for this rule-testing stage.</p>
@@ -67,31 +86,79 @@ Test runner → wazuh-logtest → expected and observed rule IDs</code></pre>
       <tr><td><code>send_dummy</code></td><td>POST the fake token to the local receiver, which checks its contents.</td><td><code>110503</code></td></tr>
     </tbody>
   </table>
-  <p>The file paths, shell command, and destination are fixed in the test server. All credentials are dummy values, and the transfer remains within the container. The server labels one file as sensitive for testing; access to that file does not bypass an operating-system permission.</p>
+  <p>The file paths, shell command, and destination are fixed in the test server. All credentials are dummy values, and the transfer remains within the container. The revised fixture places the fake token in a temporary lab <code>.env</code> file and reports its path. Wazuh decides whether that path is sensitive; access does not bypass an operating-system permission.</p>
 
-  <h2>Structured events and custom detection rules</h2>
-  <p>After reading the dummy credential file successfully, the test server writes the following JSON event:</p>
+  <h2>Structured events and Wazuh-owned path policy</h2>
+  <p>The revised fixture reports a completed read without assigning a sensitivity label:</p>
 <pre><code>{
   "integration": "mcp_lab",
   "mcp_action": "file_read",
   "tool": "read_dummy_secret",
-  "path": "/tmp/mcp-evidence-lab/dummy-secret.txt",
-  "sensitive": "yes"
+  "path": "/tmp/mcp-evidence-lab/.env"
 }</code></pre>
-  <p>Wazuh’s built-in JSON decoder extracts the event fields. A parent rule identifies events from the MCP lab. Its level of zero groups related events without generating an alert. The child rule matches a file-read event when the application has marked the file as sensitive.</p>
-<pre><code>&lt;rule id="110500" level="0"&gt;
-  &lt;decoded_as&gt;json&lt;/decoded_as&gt;
-  &lt;field name="integration"&gt;^mcp_lab$&lt;/field&gt;
-  &lt;description&gt;MCP lab structured application event&lt;/description&gt;
-&lt;/rule&gt;
-
-&lt;rule id="110501" level="8"&gt;
-  &lt;if_sid&gt;110500&lt;/if_sid&gt;
-  &lt;field name="mcp_action"&gt;^file_read$&lt;/field&gt;
-  &lt;field name="sensitive"&gt;^yes$&lt;/field&gt;
-  &lt;description&gt;MCP lab tool read a designated dummy sensitive file&lt;/description&gt;
-&lt;/rule&gt;</code></pre>
-  <p>The complete rules file places these definitions inside a group and includes additional rules for shell execution and data transfer. The shell rule checks a reported executable of <code>/bin/sh</code> or <code>/bin/bash</code>. The transfer rule checks <code>network_send</code> plus <code>sensitive=yes</code>. These conditions implement the lab’s detection policy. In a production environment, shell execution and data transfer would need to be assessed against the tool’s expected behavior.</p>
+  <p>Wazuh’s JSON decoder extracts the fields. Rule <code>110500</code> groups normalized MCP events at level zero. Rules <code>110501</code> and <code>110503</code> classify <code>path</code> and <code>source_path</code> using PCRE2. They cover <code>.ssh/</code> contents, <code>.env</code> and <code>.env.*</code>, <code>.aws/credentials</code>, and <code>.kube/config</code>. A supplied <code>sensitive=no</code> cannot suppress a matching path, and <code>sensitive=yes</code> cannot promote a public path.</p>
+  <p>This is a path policy, not content inspection: public examples such as <code>.env.example</code> also match and need environment-specific tuning. A Wazuh CDB list is an alternative for centrally maintained explicit paths; this pack implements the regex version. A compromised event source can still forge paths or omit events.</p>
+  <p>These are the complete revised rules:</p>
+<pre><code>&lt;group name=&quot;mcp_lab,&quot;&gt;
+  &lt;rule id=&quot;110500&quot; level=&quot;0&quot;&gt;
+    &lt;decoded_as&gt;json&lt;/decoded_as&gt;
+    &lt;field name=&quot;integration&quot;&gt;^mcp_lab$&lt;/field&gt;
+    &lt;description&gt;MCP normalized application event&lt;/description&gt;
+  &lt;/rule&gt;
+  &lt;rule id=&quot;110501&quot; level=&quot;8&quot;&gt;
+    &lt;if_sid&gt;110500&lt;/if_sid&gt;
+    &lt;field name=&quot;mcp_action&quot;&gt;^file_read$&lt;/field&gt;
+    &lt;field name=&quot;path&quot; type=&quot;pcre2&quot;&gt;(?:^|/)(?:\.ssh/|\.env(?:\.[^/]*)?$|\.aws/credentials$|\.kube/config$)&lt;/field&gt;
+    &lt;description&gt;MCP tool read a credential-related path&lt;/description&gt;
+    &lt;mitre&gt;&lt;id&gt;T1552.001&lt;/id&gt;&lt;/mitre&gt;
+  &lt;/rule&gt;
+  &lt;rule id=&quot;110502&quot; level=&quot;8&quot;&gt;
+    &lt;if_sid&gt;110500&lt;/if_sid&gt;
+    &lt;field name=&quot;mcp_action&quot;&gt;^process_start$&lt;/field&gt;
+    &lt;field name=&quot;executable&quot; type=&quot;pcre2&quot;&gt;^/(?:usr/(?:local/)?)?bin/(?:sh|bash|dash|zsh|ksh|ash)$&lt;/field&gt;
+    &lt;description&gt;MCP tool started a Unix shell&lt;/description&gt;
+    &lt;mitre&gt;&lt;id&gt;T1059.004&lt;/id&gt;&lt;/mitre&gt;
+  &lt;/rule&gt;
+  &lt;rule id=&quot;110503&quot; level=&quot;10&quot;&gt;
+    &lt;if_sid&gt;110500&lt;/if_sid&gt;
+    &lt;field name=&quot;mcp_action&quot;&gt;^network_send$&lt;/field&gt;
+    &lt;field name=&quot;source_path&quot; type=&quot;pcre2&quot;&gt;(?:^|/)(?:\.ssh/|\.env(?:\.[^/]*)?$|\.aws/credentials$|\.kube/config$)&lt;/field&gt;
+    &lt;description&gt;MCP tool transferred data from a credential-related path (lab: loopback only)&lt;/description&gt;
+    &lt;mitre&gt;&lt;id&gt;T1048&lt;/id&gt;&lt;/mitre&gt;
+  &lt;/rule&gt;
+  &lt;rule id=&quot;110504&quot; level=&quot;8&quot;&gt;
+    &lt;if_sid&gt;110500&lt;/if_sid&gt;
+    &lt;field name=&quot;mcp_action&quot;&gt;^process_start$&lt;/field&gt;
+    &lt;field name=&quot;executable&quot; type=&quot;pcre2&quot;&gt;^/(?:usr/(?:local/)?)?bin/python(?:[23](?:\.[0-9]+)?)?$&lt;/field&gt;
+    &lt;field name=&quot;argument1&quot;&gt;^-c$&lt;/field&gt;
+    &lt;description&gt;MCP tool started Python inline code&lt;/description&gt;
+    &lt;mitre&gt;&lt;id&gt;T1059.006&lt;/id&gt;&lt;/mitre&gt;
+  &lt;/rule&gt;
+  &lt;rule id=&quot;110505&quot; level=&quot;8&quot;&gt;
+    &lt;if_sid&gt;110500&lt;/if_sid&gt;
+    &lt;field name=&quot;mcp_action&quot;&gt;^process_start$&lt;/field&gt;
+    &lt;field name=&quot;executable&quot; type=&quot;pcre2&quot;&gt;^/(?:usr/(?:local/)?)?bin/node(?:js)?$&lt;/field&gt;
+    &lt;field name=&quot;argument1&quot; type=&quot;pcre2&quot;&gt;^(?:-e|--eval)$&lt;/field&gt;
+    &lt;description&gt;MCP tool started JavaScript inline code&lt;/description&gt;
+    &lt;mitre&gt;&lt;id&gt;T1059.007&lt;/id&gt;&lt;/mitre&gt;
+  &lt;/rule&gt;
+&lt;/group&gt;
+</code></pre>
+  <p>The shell rule covers sh, bash, dash, zsh, ksh and ash under <code>/bin</code>, <code>/usr/bin</code>, and <code>/usr/local/bin</code>. Separate rules cover Python <code>-c</code> and Node <code>-e</code>/<code>--eval</code> when the flag is argv[1]. Ordinary script invocations remain outside the inline-code policy. Other interpreter locations, flags before <code>-c</code>, combined options, wrappers such as <code>env</code>, and other runtimes need additional normalization and tested rules. Legitimate tool execution can match; an alert alone does not establish abuse.</p>
+  <p>The transfer rule requires a reported source path matching the credential-path policy. Missing provenance means no match; it does not reconstruct the source of arbitrary or transformed bytes. The fixture now reports <code>source_path=/tmp/mcp-evidence-lab/.env</code>, a loopback destination, and byte count.</p>
+  <h2>MITRE ATT&amp;CK context</h2>
+  <table>
+    <caption>Mappings included in the revised rule file</caption>
+    <thead><tr><th scope="col">Rule</th><th scope="col">Technique</th><th scope="col">Interpretation</th></tr></thead>
+    <tbody>
+      <tr><td>110501</td><td>T1552.001 — Credentials in Files</td><td>A credential-related path was reported read; actual contents and malicious intent are unproven.</td></tr>
+      <tr><td>110502</td><td>T1059.004 — Unix Shell</td><td>A shell was started; authorized automation may do this.</td></tr>
+      <tr><td>110503</td><td>T1048 — Exfiltration Over Alternative Protocol</td><td>A transfer behavior analogy. The lab sends dummy data over loopback only; it demonstrates no external exfiltration.</td></tr>
+      <tr><td>110504</td><td>T1059.006 — Python</td><td>Inline Python execution.</td></tr>
+      <tr><td>110505</td><td>T1059.007 — JavaScript/JScript</td><td>Inline Node.js execution.</td></tr>
+    </tbody>
+  </table>
+  <p>The tags support triage and ATT&amp;CK views in Wazuh. T1041 is not used because the lab establishes no command-and-control channel. Technique mappings describe potentially relevant behavior; they are not evidence of an adversary or successful credential theft.</p>
 
   <h2>Resolving a Wazuh field-name conflict</h2>
   <p>The first event schema used <code>action</code>. Writing <code>&lt;field name="action"&gt;</code> in the child rule caused the analysis daemon to reject the rules:</p>
@@ -99,8 +166,9 @@ Test runner → wazuh-logtest → expected and observed rule IDs</code></pre>
   <p>Wazuh treats that name as a static field, so it cannot be matched through that dynamic-field expression. The event field was renamed to <code>mcp_action</code> and the rules were tested again. This illustrates why validation must include the Wazuh engine: valid JSON alone does not establish that a rule can load or match it.</p>
   <p>The container startup restores the image’s packaged configuration and starts the database and analysis services required by logtest. The runner waits for the logtest socket, which indicates that the testing interface is available, before submitting events. This configuration supports the lab’s rule tests and should not be treated as a production deployment.</p>
 
-  <h2>Detection validation and results</h2>
-  <p>The client executes the four scenarios first. The verification script reads their fresh events, adds four constructed negative controls—events designed to remain outside the alert conditions— and submits each case to Wazuh. It checks the final rule ID against the expected outcome and saves the raw output.</p>
+  <h2>Original detection validation and results</h2>
+  <p class="note"><strong>Historical evidence:</strong> the following table and screenshots show the original 13 November rules, which used <code>sensitive=yes</code>. They do not validate the revised path or interpreter rules above.</p>
+  <p>In the original run, the client executed the four scenarios first. The verification script read their fresh events, added four constructed negative controls, and submitted each case to Wazuh. It checks the final rule ID against the expected outcome and saves the raw output.</p>
   <table>
     <caption>Recorded run, 13 November 2026 · Wazuh 4.14.10</caption>
     <thead><tr><th scope="col">Case</th><th scope="col">Observed rule</th><th scope="col">Result</th></tr></thead>
@@ -119,19 +187,23 @@ Test runner → wazuh-logtest → expected and observed rule IDs</code></pre>
   <p>For the dummy-secret read, the engine reported:</p>
 <figure>
     <a href="../assets/mcp-wazuh/logtest-sensitive-read.jpg"><img src="../assets/mcp-wazuh/logtest-sensitive-read.jpg" alt="Recorded Wazuh logtest output: JSON fields decoded and rule 110501 matched at level 8 for the dummy sensitive-file read." width="1280" height="869" loading="lazy"></a>
-    <figcaption>Figure 1. The dummy sensitive-file read matches rule 110501 at level 8. Screenshot of the saved, unmodified logtest output displayed in a static evidence viewer.</figcaption>
+    <figcaption>Figure 1. Original 13 November rules: the dummy sensitive-file read matches rule 110501 at level 8. Screenshot of the saved, unmodified logtest output displayed in a static evidence viewer.</figcaption>
   </figure>
   <p>The message “Alert to be generated” confirms that the supplied event matches an alerting rule. It does not verify collection by an agent, ingestion by a running manager, or display in the Wazuh dashboard. The <a href="https://documentation.wazuh.com/current/user-manual/ruleset/testing.html">Wazuh logtest documentation</a> explains the tool’s decoding and rule-testing role.</p>
   <p>The public-file read provides a comparison. It is decoded successfully and matches only the level-zero grouping rule. The sensitive-file detection does not match, which is the expected outcome for this control.</p>
   <figure>
     <a href="../assets/mcp-wazuh/logtest-public-read.jpg"><img src="../assets/mcp-wazuh/logtest-public-read.jpg" alt="Recorded Wazuh logtest output: the public-file read matches grouping rule 110500 at level 0 without a custom alert." width="1280" height="845" loading="lazy"></a>
-    <figcaption>Figure 2. The public-file read remains at rule 110500, level 0. Both figures show rule-test output from the lab rerun, rather than dashboard alerts.</figcaption>
+    <figcaption>Figure 2. The public-file read remains at rule 110500, level 0. Both figures show historical rule-test output, rather than dashboard alerts or validation of the revised rules.</figcaption>
   </figure>
   <p>The <a href="https://github.com/SAMsploit1/mcp-wazuh-lab/tree/main/results/2026-11-13">recorded run</a> includes the four generated events, all eight raw logtest outputs, and the machine-readable expected-versus-observed results.</p>
 
+  <h2>Reviewer revision validation</h2>
+  <p>The revision adds 66 constructed policy cases covering missing fields, unrelated sources, sensitivity-label overrides, credential and public look-alike paths, alternate shells, inline Python/Node calls, and ordinary script invocations. Static XML and regex checks passed. These checks use Python regex for patterns that share its syntax; they do not establish Wazuh PCRE2 behavior or successful engine rule loading.</p>
+  <p>The updated runner submitted four newly executed fixture events plus those 66 regression cases to Wazuh 4.14.10 in a two-core, 8 GiB GitHub Codespace. <strong>All 70 cases passed: 48 expected detections and 22 negative controls.</strong> Every event decoded as JSON. Inspection of the raw output confirmed the expected rule levels and ATT&amp;CK IDs for every positive case, and no alert-generation message for every negative control. The <a href="https://github.com/SAMsploit1/mcp-wazuh-lab/tree/main/results/2026-11-16">new recorded run</a> includes all raw outputs, generated events, environment details and tested-source hashes. The runner removed its containers, and the Codespace was deleted after the evidence was downloaded. Independent host collection and end-to-end alert delivery remain future validation steps.</p>
+
   <h2>Interpreting the evidence and its limitations</h2>
-  <p>The test server both performs the action and records it. This creates a dependency on the integrity of the application’s logging. A compromised server could omit an event, change <code>sensitive</code> to <code>no</code>, or report a different executable. Consequently, a successful rule match establishes how Wazuh interprets the supplied event, rather than independently verifying the underlying action.</p>
-  <p>The current event schema also has limitations. The events have no request identifier, timestamp, PID, parent PID, or user identity. A PID is a process identifier; a parent PID identifies the process that launched it. The sensitivity label is not independently derived. The loopback POST demonstrates a local transfer, not internet exfiltration. And an executable name by itself says little about whether its invocation was authorized.</p>
+  <p>The test server both performs the action and records it. This creates a dependency on the integrity of the application’s logging. A compromised server could omit an event, forge a path, source path, or executable. Consequently, a successful rule match establishes how Wazuh interprets the supplied event, rather than independently verifying the underlying action.</p>
+  <p>The current event schema also has limitations. The events have no request identifier, timestamp, PID, parent PID, or user identity. A PID is a process identifier; a parent PID identifies the process that launched it. Wazuh now classifies sensitivity from the reported path, but that path is still application-supplied. The loopback POST demonstrates a local transfer, not internet exfiltration. And an executable name by itself says little about whether its invocation was authorized.</p>
   <p>The next validation stage is to compare application events with independently collected Linux file-access and process-execution records. Those records should preserve process identity, parent-child relationships, and the relevant user account. Repeating the scenarios with application logging disabled would then establish whether the actions remain observable through host telemetry.</p>
   <p>Independent host collection has not yet been tested in this lab. Its deployment requirements and behavior must be validated before extending the detection claims.</p>
 
@@ -140,6 +212,7 @@ Test runner → wazuh-logtest → expected and observed rule IDs</code></pre>
 <pre><code>git clone https://github.com/SAMsploit1/mcp-wazuh-lab.git
 cd mcp-wazuh-lab
 sh scripts/run.sh</code></pre>
+  <p>For static checks before the engine run, use <code>python3 tests/check_policy.py</code>. The revised 70-case engine run is recorded under <code>results/2026-11-16/</code>.</p>
   <p>The runner starts Wazuh, waits for the socket, executes the test server, verifies the cases, and removes the lab containers on exit. It writes generated evidence under <code>evidence/</code>, which is excluded from Git. If the runner is killed before cleanup, run <code>docker compose down</code> from the repository directory.</p>
 
   <div class="cta">
