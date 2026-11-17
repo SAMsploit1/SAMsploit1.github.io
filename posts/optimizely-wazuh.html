@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hunting the Optimizely JavaScript supply-chain attack with Wazuh · SAMspl0it</title>
+<meta name="description" content="Replay browser CSP reports on Wazuh 4.14.10, verify live alerts, and hunt for campaign traffic.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="../">SAM<span class="dot">spl0it</span></a>
+    <nav><a href="../#posts">Posts</a><a href="../#projects">Projects</a></nav>
+    <span class="spacer"></span>
+    <a class="ghbtn" href="https://github.com/SAMsploit1">GitHub ↗</a>
+  </div>
+</header>
+
+<main>
+  <div class="kicker">Detection Engineering · Browser Security · Wazuh 4.14</div>
+  <h1>Hunting the Optimizely JavaScript supply-chain attack with Wazuh</h1>
+  <p class="dek">Replay browser CSP reports on Wazuh 4.14.10, verify live alerts, and hunt for campaign traffic.</p>
+
+  <div class="byline">
+    <div class="avatar">S</div>
+    <div>
+      <div class="who">SAMspl0it</div>
+      <div class="meta"><time datetime="2026-11-17">2026-11-17</time> · 5 min read</div>
+    </div>
+  </div>
+
+<p>On 16 November 2026, visitors to websites using Optimizely Web Experimentation received malicious JavaScript through otherwise legitimate Optimizely snippets. Report URI documented cryptocurrency address replacement, payment-card skimming, cookie theft, and attempts to deliver iOS exploit kits. Optimizely subsequently reported fixing the vulnerability and removing the injected code from affected projects. <a href="https://report-uri.ghost.io/worlds-largest-brands-infected-with-malware-via-optimizely/">Report URI investigation</a> · <a href="https://status.optimizely.com/">Optimizely incident status</a></p>
+<p>The investigation raises a question for Wazuh operators. What evidence is available when the compromised code runs in a visitor’s browser and arrives from a domain the site already trusts? One source is the browser’s Content Security Policy (CSP) violation report. This write-up shows how to turn those reports into a campaign-specific Wazuh alert and use it to guide a hunt.</p>
+<h2>What to contain first</h2>
+<p>If you operate a site that uses Optimizely Web Experimentation, identify which pages loaded an affected project and temporarily disable the snippet on exposed sensitive pages until you can verify a clean copy. Review Project JavaScript, experiment code, access history, and cached or self-hosted copies. Preserve the evidence you have before purging caches. If you identify potentially exposed authentication or payment pages, scope the affected sessions and transactions with your incident response and payment teams. <a href="https://report-uri.ghost.io/worlds-largest-brands-infected-with-malware-via-optimizely/#what-to-do-now">Report URI response guidance</a></p>
+<p>On sites you control, enforce a CSP with narrow <code>script-src</code>, <code>connect-src</code>, and <code>frame-src</code> policies appropriate to your application. Test the policy against legitimate dependencies, review how <code>'strict-dynamic'</code> extends trust to scripts loaded by a trusted snippet, and remove <code>'unsafe-eval'</code> where possible. Blocking the campaign’s published domains and subdomains at managed DNS or a secure web gateway can stop those destinations from being reached on managed networks. In-page actions, such as changing a displayed wallet address, can still occur without an outbound connection. <a href="https://world.optimizely.com/blogs/mark-stott/dates/2026/11/lessons-from-the-optimizely-web-experimentation-compromise/">Optimizely developer community analysis</a> · <a href="https://report-uri.ghost.io/worlds-largest-brands-infected-with-malware-via-optimizely/#indicators-of-compromise">Published indicators</a></p>
+<h2>Bring browser reports into Wazuh</h2>
+<p>A CSP violation report describes what the browser saw. Its disposition tells you whether the applicable policy enforced the restriction or only reported it.</p>
+<table>
+<thead>
+<tr>
+<th>Disposition</th>
+<th>How to read it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enforce</code></td>
+<td>The browser reported blocking the specific action covered by the violation. Investigate what else ran or was allowed.</td>
+</tr>
+<tr>
+<td><code>report</code></td>
+<td>A report-only policy observed a violation. The report-only policy did not block the action. Look for independent evidence of an allowed request or exposure.</td>
+</tr>
+</tbody>
+</table>
+<p>The companion ruleset accepts two common formats through its jq normalizer. Legacy CSP reports arrive as a <code>csp-report</code> object. Reporting API requests can contain an array of reports. The normalizer extracts the destination hostname, disposition, and effective directive, then emits one JSON object per qualifying report. It omits the page URL and the rest of the raw report. <a href="https://www.w3.org/TR/CSP3/">CSP specification</a></p>
+<p>Rule <code>100980</code> uses Wazuh’s built-in JSON decoder and alerts at level 10 when the hostname is one of the 12 published campaign domains or a subdomain of one. The rule compares DNS labels so an unrelated hostname that merely contains a campaign string stays silent. A request to the ordinary Optimizely CDN also stays outside this rule’s campaign match.</p>
+<h3>Set up the collection path</h3>
+<ol>
+<li>
+<p>Configure your site to send CSP reports to a collector you control. Use the collector’s export or transformation pipeline to pass the JSON request bodies to the included <code>normalize-csp.jq</code> file. For a one-off export, for example:</p>
+<pre><code class="language-sh">jq -c -f normalize-csp.jq exported-csp-bodies.jsonl &gt;&gt; /var/log/optimizely-csp.jsonl
+</code></pre>
+</li>
+<li>
+<p>Add a JSON <code>localfile</code> input for <code>/var/log/optimizely-csp.jsonl</code> on the Wazuh agent or manager reading the log. Restrict access to the log and raw collector records. A public reporting endpoint can receive forged reports, so use independent evidence before treating an alert as confirmed activity.</p>
+</li>
+<li>
+<p>Check that rule ID <code>100980</code> is available and install <code>optimizely_csp_rules.xml</code> in the manager’s <code>/var/ossec/etc/rules/</code> directory. Follow the companion README to validate the configuration, run fixture replay, and restart the relevant services. Search for <code>rule.id:100980</code> in Threat Hunting. <a href="https://documentation.wazuh.com/current/user-manual/ruleset/rules/custom.html">Wazuh custom rules</a> · <a href="https://documentation.wazuh.com/current/user-manual/reference/ossec-conf/localfile.html">Wazuh localfile reference</a></p>
+</li>
+</ol>
+<h3>Replay a safe test before relying on alerts</h3>
+<p>From the companion integration directory, run the fixture suite on a test manager after installing the XML rule.</p>
+<pre><code class="language-sh">sudo python3 tests/check.py --logtest /var/ossec/bin/wazuh-logtest
+</code></pre>
+<p>The fixtures contain synthetic reports and make no network requests. The expected result is rule <code>100980</code> at level 10 for both an enforced script violation and a report-only frame violation. The suite also checks the ordinary CDN, hostname look-alikes, a campaign domain in a URL path, and inputs the normalizer should discard.</p>
+<p>All nine fixture checks passed with the official Wazuh 4.14.10 manager image in a disposable Codespace. The image reported revision <code>rc2</code>. Six fixtures reached the Wazuh JSON decoder. Two matched the campaign rule and four served as negative controls. The normalizer discarded three inputs. <a href="https://documentation.wazuh.com/current/user-manual/reference/tools/wazuh-logtest.html">Wazuh logtest reference</a></p>
+<figure>
+<img src="../assets/optimizely-wazuh/logtest-enforce.png" alt="Wazuh Logtest decodes an enforced script violation and matches rule 100980 at level 10." loading="lazy">
+<figcaption>The enforced script fixture matched rule 100980 on Wazuh 4.14.10.</figcaption>
+</figure>
+<figure>
+<img src="../assets/optimizely-wazuh/logtest-cdn-control.png" alt="Wazuh Logtest decodes a normal Optimizely CDN hostname without a campaign match." loading="lazy">
+<figcaption>The normal Optimizely CDN hostname decoded as JSON and produced no campaign alert.</figcaption>
+</figure>
+<p>I also replayed the fixture export into the manager’s monitored JSON file. The running manager wrote exactly two campaign alerts to <code>alerts.json</code>. The first retained the enforced script violation. The second retained the report-only frame violation. This tested the pipeline from a collector-style export through Wazuh log collection and alerting. Browser delivery to a production reporting endpoint is outside the lab.</p>
+<figure>
+<img src="../assets/optimizely-wazuh/manager-alerts.png" alt="Two live Wazuh alert records with rule 100980 and the enforce and report dispositions." loading="lazy">
+<figcaption>Selected fields from the two live manager alerts. The images show captured manager output.</figcaption>
+</figure>
+<p>Run <code>bash tests/run-lab.sh</code> from the companion integration directory to repeat the manager and file ingestion checks with Docker.</p>
+<h2>Investigate the alert and its blind spots</h2>
+<p>Start with the hostname, directive, and disposition. A <code>script-src-elem</code> violation involving a campaign domain can indicate an attempt to load a script. A <code>connect-src</code> violation can indicate that browser code attempted to reach that destination. Check the collector for the affected page and event time, then correlate with DNS, proxy, and script-change telemetry. A DNS lookup alone shows interest in a destination. Proxy evidence of an allowed connection strengthens the case for follow-up, while proving data exposure requires additional evidence.</p>
+<p>For this incident, start the Optimizely-specific hunt with <strong>04:21–23:11 UTC on 16 November 2026</strong>, the first observed Optimizely injection through the last observed cleanup in Report URI’s timeline. Widen the window if your telemetry suggests earlier activity or later delivery from a cache. Look for the published destinations in historical logs even if domains no longer resolve. <a href="https://report-uri.ghost.io/worlds-largest-brands-infected-with-malware-via-optimizely/">Report URI timeline and updates</a></p>
+<p>This rule needs a collected CSP report that names a campaign destination. Browsers can execute code under a permissive policy without generating that report. Inline or eval violations also lack the destination hostname this rule needs. Use archived script copies and DNS or proxy telemetry to cover those gaps, and verify changes to third-party scripts independently of whether the browser raised an alert.</p>
+<p>The companion package contains the rule, normalizer, sample reports, lab script, recorded manager output, and deployment README. If you test it, share the Wazuh version, collector format, and any unexpected results. Keep visitor and payment data out of shared examples. <a href="https://github.com/SAMsploit1/integrations/tree/feat/optimizely-csp-detection/integrations/optimizely_csp">Integration and lab files</a></p>
+
+  <div class="cta">
+    <h3 class="sans">More from the lab</h3>
+    <p>Detections, integrations, and write-ups on Wazuh and friends.</p>
+    <a class="ghbtn" href="../">All posts ↗</a>
+  </div>
+</main>
+
+<footer>
+  <p>Written by <strong>SAMspl0it</strong> · <a href="../">more posts</a>.
+  Wazuh and the Wazuh logo are trademarks of Wazuh Inc.; this is an independent community project.</p>
+</footer>
+</body>
+</html>
