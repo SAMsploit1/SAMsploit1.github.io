@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Finding Java4Shell patch priorities with Wazuh · SAMspl0it</title>
+<meta name="description" content="Prioritize CVE-2026-114938 remediation from running JVM inventory and reproduce nine Wazuh Logtest cases.">
+<link rel="canonical" href="https://samsploit1.github.io/posts/java4shell-wazuh.html">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="../">SAM<span class="dot">spl0it</span></a>
+    <nav><a href="../#posts">Posts</a><a href="../#projects">Projects</a></nav>
+    <span class="spacer"></span>
+    <a class="ghbtn" href="https://github.com/SAMsploit1">GitHub ↗</a>
+  </div>
+</header>
+
+<main>
+  <div class="kicker">Vulnerability Management · OpenJDK · Wazuh 4.14</div>
+  <h1>Finding Java4Shell patch priorities with Wazuh</h1>
+  <p class="dek">Prioritize CVE-2026-114938 remediation from running JVM inventory and reproduce nine Wazuh Logtest cases.</p>
+
+  <div class="byline">
+    <div class="avatar">S</div>
+    <div>
+      <div class="who">SAMspl0it</div>
+      <div class="meta"><time datetime="2026-11-18">2026-11-18</time> · 3 min read</div>
+    </div>
+  </div>
+
+  <p>The Java version in a package inventory and the Java version serving traffic can diverge. After an update, an old JVM may keep running until the service restarts. A container can also bring its own Java build. For Java4Shell, CVE-2026-114938, I built a Wazuh integration around the runtime serving the workload.</p>
+
+  <p>Java4Shell is a memory corruption flaw affecting a hardware-accelerated Base64 decoding path in OpenJDK. Red Hat describes the combination of an affected build, x86-64 with AVX-512 VBMI, and an application that decodes attacker-controlled input. Oracle&#x27;s patch advisory gives product-specific affected builds, including an Oracle Java SE 8 performance build. I use the deployed vendor&#x27;s advisory for each exact build because feature-version checks can miss exceptions and backports. <a href="https://access.redhat.com/security/vulnerabilities/RHSB-2026-018">Red Hat bulletin</a> · <a href="https://www.oracle.com/security-alerts/cspunov2026.html#AppendixJAVA">Oracle patch advisory</a></p>
+
+  <h2>Three observations per workload</h2>
+
+  <p>I record the exact build of the running JVM and its vendor verdict, the CPU features visible in the workload environment, and whether the live process has an effective workaround. On a HotSpot JVM that permits attach, an operator can inspect the process with <code>jcmd PID VM.version</code> and <code>jcmd PID VM.flags -all</code>. Red Hat documents disabling Base64 intrinsics as a temporary workaround on applicable builds and also describes disabling AVX-512 on x86-64. Check vendor guidance before changing JVM flags. <a href="https://access.redhat.com/security/vulnerabilities/RHSB-2026-018">Red Hat bulletin</a></p>
+
+  <p>A small Python tool packages the observations into a JSON line for Wazuh&#x27;s built-in decoder. Rule 112939 raises a level-8 alert when the vendor says the build is affected, the CPU prerequisites are present, and the workaround is absent. Rule 112940 raises a level-5 alert when the record lacks evidence and has no verified exclusion. Fixed builds, workloads without the required CPU path, and workloads with a verified workaround stay quiet in the replay. This lets the analyst route a patch task and an inventory follow-up to the right owners.</p>
+
+  <h2>From alert to action</h2>
+
+  <p>Start with affected services that process untrusted input. Patch through the runtime vendor, rebuild container images where appropriate, and roll out the fixed runtime. Run the assessment again after restart and confirm the running build. Keep that evidence in inventory because the Wazuh alert history will still show the earlier observation.</p>
+
+  <p>The alerts describe exposure prerequisites. App-specific reachability and incident evidence require their own investigation. If a JVM missed the inventory pass, the absence of an alert gives no information about its status. A reliable collection process matters as much as the rule.</p>
+
+  <h2>Validation</h2>
+
+  <p>All nine cases passed in Wazuh Logtest on the 4.14.10 manager image, which reported revision rc2. Five controls produced no alerts. The replay uses synthetic inventory to exercise the alert paths and controls. It covers an affected JVM, fixed and unaffected builds, CPU capability absent, a verified mitigation, and missing evidence. It exercises the decision rules with known input. Production inventory accuracy and end-to-end agent ingestion are outside the replay.</p>
+
+  <p><a href="https://github.com/SAMsploit1/java4shell-wazuh/blob/main/tests/results-wazuh-4.14.10.txt">Recorded Logtest output</a></p>
+
+  <div class="cta">
+    <a class="ghbtn" href="https://github.com/SAMsploit1/java4shell-wazuh">Java4Shell Wazuh project on GitHub ↗</a>
+  </div>
+</main>
+
+<footer>
+  <p>Written by <strong>SAMspl0it</strong> · <a href="../">more posts</a>.
+  Wazuh and the Wazuh logo are trademarks of Wazuh Inc.; this is an independent community project.</p>
+</footer>
+</body>
+</html>
