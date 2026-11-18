@@ -30,7 +30,7 @@
     <div class="avatar">S</div>
     <div>
       <div class="who">SAMspl0it</div>
-      <div class="meta"><time datetime="2026-11-18">2026-11-18</time> · 3 min read</div>
+      <div class="meta"><time datetime="2026-11-18">2026-11-18</time> · 7 min read</div>
     </div>
   </div>
 
@@ -50,26 +50,120 @@
 
   <p>The alerts describe exposure prerequisites. App-specific reachability and incident evidence require their own investigation. If a JVM missed the inventory pass, the absence of an alert gives no information about its status. A reliable collection process matters as much as the rule.</p>
 
-  <h2>What the Wazuh manager reported</h2>
+  <h2>Set it up step by step</h2>
 
-  <p>All nine synthetic cases passed on the Wazuh 4.14.10 manager image (internal revision rc2). Five controls stayed silent. I reran three representative cases on a disposable manager and captured the decoder and rule output below. The images show excerpts from <code>wazuh-logtest</code>. Live agent ingestion and production runtime inventory remain unverified.</p>
+  <p>You need a Wazuh 4.x manager, shell access with <code>sudo</code>, Git, and Python 3. Start on a test manager. In this walkthrough, the manager reads the JSON file locally, so you can verify the whole path without configuring an agent first.</p>
+
+  <h3>1. Get the files and install the rules</h3>
+
+  <pre><code class="language-sh">git clone https://github.com/SAMsploit1/java4shell-wazuh.git
+cd java4shell-wazuh</code></pre>
+
+  <p>Here is the complete rule file. The level-0 rule identifies this assessment by its event type and CVE. Its child rules use the values from the JSON record to distinguish patch priority from missing evidence. Before installing the file, search the manager’s custom rules for these IDs. A fresh setup should return no matches. If the search finds any, resolve the ID conflict before installing.</p>
+
+  <pre><code class="language-xml">&lt;group name=&quot;java4shell_exposure,&quot;&gt;
+  &lt;rule id=&quot;112938&quot; level=&quot;0&quot;&gt;
+    &lt;decoded_as&gt;json&lt;/decoded_as&gt;
+    &lt;field name=&quot;event_type&quot; type=&quot;pcre2&quot;&gt;^java4shell_runtime_assessment$&lt;/field&gt;
+    &lt;field name=&quot;cve&quot; type=&quot;pcre2&quot;&gt;^CVE-2026-114938$&lt;/field&gt;
+    &lt;description&gt;Java4Shell runtime assessment&lt;/description&gt;
+  &lt;/rule&gt;
+
+  &lt;rule id=&quot;112939&quot; level=&quot;8&quot;&gt;
+    &lt;if_sid&gt;112938&lt;/if_sid&gt;
+    &lt;field name=&quot;vendor_status&quot; type=&quot;pcre2&quot;&gt;^affected$&lt;/field&gt;
+    &lt;field name=&quot;cpu_path&quot; type=&quot;pcre2&quot;&gt;^present$&lt;/field&gt;
+    &lt;field name=&quot;mitigation&quot; type=&quot;pcre2&quot;&gt;^absent$&lt;/field&gt;
+    &lt;description&gt;Java4Shell patch priority for $(workload) running $(runtime)&lt;/description&gt;
+  &lt;/rule&gt;
+
+  &lt;rule id=&quot;112940&quot; level=&quot;5&quot;&gt;
+    &lt;if_sid&gt;112938&lt;/if_sid&gt;
+    &lt;field name=&quot;vendor_status&quot; type=&quot;pcre2&quot;&gt;^(affected|unknown)$&lt;/field&gt;
+    &lt;field name=&quot;cpu_path&quot; type=&quot;pcre2&quot;&gt;^(present|unknown)$&lt;/field&gt;
+    &lt;field name=&quot;mitigation&quot; type=&quot;pcre2&quot;&gt;^(absent|unknown)$&lt;/field&gt;
+    &lt;field name=&quot;assessment_complete&quot; type=&quot;pcre2&quot;&gt;^no$&lt;/field&gt;
+    &lt;description&gt;Java4Shell assessment needs more evidence for $(workload)&lt;/description&gt;
+  &lt;/rule&gt;
+&lt;/group&gt;</code></pre>
+
+  <pre><code class="language-sh">sudo grep -RE &#x27;id=&quot;11293[89]&quot;|id=&quot;112940&quot;&#x27; /var/ossec/etc/rules/</code></pre>
+
+  <pre><code class="language-sh">sudo install -m 0644 ruleset/rules/java4shell_rules.xml /var/ossec/etc/rules/java4shell_rules.xml</code></pre>
+
+  <h3>2. Tell Wazuh where to read the JSON</h3>
+
+  <pre><code class="language-sh">sudo touch /var/log/java4shell-assessments.jsonl
+sudo chmod 0640 /var/log/java4shell-assessments.jsonl
+sudoedit /var/ossec/etc/ossec.conf</code></pre>
+
+  <p>Add the block below inside an existing <code>&lt;ossec_config&gt;</code> element. The file contains one JSON object per line. Wazuh already ships the <code>json</code> decoder, so this setup needs only the file input and custom rules. Leave the stock decoder files alone.</p>
+
+  <pre><code class="language-xml">&lt;localfile&gt;
+  &lt;location&gt;/var/log/java4shell-assessments.jsonl&lt;/location&gt;
+  &lt;log_format&gt;json&lt;/log_format&gt;
+&lt;/localfile&gt;</code></pre>
+
+  <p>For reference, this is the stock decoder from <code>ruleset/decoders/0006-json_decoders.xml</code> on the lab manager. Its plugin extracts keys such as <code>vendor_status</code> and <code>mitigation</code> for the rules above.</p>
+
+  <pre><code class="language-xml">&lt;decoder name=&quot;json&quot;&gt;
+  &lt;prematch&gt;^{\s*&quot;&lt;/prematch&gt;
+  &lt;plugin_decoder&gt;JSON_Decoder&lt;/plugin_decoder&gt;
+&lt;/decoder&gt;</code></pre>
+
+  <pre><code class="language-sh">sudo /var/ossec/bin/wazuh-analysisd -t
+sudo /var/ossec/bin/wazuh-logcollector -t
+sudo systemctl restart wazuh-manager
+sudo systemctl status wazuh-manager --no-pager</code></pre>
+
+  <p>Run the restart after both configuration checks succeed. If either reports an error, fix the file it names and rerun the check.</p>
+
+  <h3>3. Replay a synthetic assessment in Logtest</h3>
+
+  <p>Generate a sample from the repository directory and pipe it into the manager’s rule tester. The three options below supply fixture values. For real assessments, use the running build, workload CPU features, and verified mitigation described above.</p>
+
+  <pre><code class="language-sh">python3 assess.py --workload synthetic-api --runtime &#x27;Fixture JVM&#x27; \
+  --vendor-status affected --cpu-path present --mitigation absent |
+  sudo /var/ossec/bin/wazuh-logtest</code></pre>
+
+  <p>Look for <code>name: 'json'</code> in Phase 2 and rule <code>112939</code> at level 8 in Phase 3. Phase 2 shows what the decoder extracted. Phase 3 shows the rule decision for that event.</p>
 
   <figure>
-    <a href="../assets/java4shell/patch-priority.png"><img src="../assets/java4shell/patch-priority.png" alt="Wazuh Logtest decodes an affected build with CPU prerequisites present and mitigation absent, then matches rule 112939 at level 8." loading="lazy"></a>
-    <figcaption>Figure 1. An affected build with the CPU prerequisites present and no effective mitigation matches rule 112939 at level 8.</figcaption>
+    <a href="../assets/java4shell/manager-logtest.png"><img src="../assets/java4shell/manager-logtest.png" alt="Wazuh manager terminal showing version 4.14.10 rc2, JSON decoding, and rule 112939 at level 8." loading="lazy"></a>
+    <figcaption>Figure 1. Screenshot of the Wazuh manager terminal. Logtest decoded the synthetic record as JSON and matched rule 112939 at level 8.</figcaption>
   </figure>
+
+  <h3>4. Send the event through the manager’s real log pipeline</h3>
+
+  <p>Append a fresh sample after the service is running, then check the manager’s alert file. If Logcollector has just started, allow a few seconds for it to open the file and retry with a fresh event.</p>
+
+  <pre><code class="language-sh">python3 assess.py --workload synthetic-api --runtime &#x27;Fixture JVM&#x27; \
+  --vendor-status affected --cpu-path present --mitigation absent |
+  sudo tee -a /var/log/java4shell-assessments.jsonl &gt;/dev/null
+
+sudo grep -F &#x27;&quot;id&quot;:&quot;112939&quot;&#x27; /var/ossec/logs/alerts/alerts.json | tail -n 1</code></pre>
 
   <figure>
-    <a href="../assets/java4shell/evidence-gap.png"><img src="../assets/java4shell/evidence-gap.png" alt="Wazuh Logtest matches rule 112940 at level 5 for an affected build with unknown mitigation." loading="lazy"></a>
-    <figcaption>Figure 2. An unknown mitigation state routes the finding to rule 112940 at level 5 for follow-up.</figcaption>
+    <a href="../assets/java4shell/manager-alerts.png"><img src="../assets/java4shell/manager-alerts.png" alt="Terminal output from the manager’s alerts.json showing rule 112939 at level 8 and rule 112940 at level 5." loading="lazy"></a>
+    <figcaption>Figure 2. Screenshot of the manager terminal showing alerts read directly from alerts.json after local file ingestion. Only the affected and unknown-mitigation fixtures produced alerts.</figcaption>
   </figure>
 
-  <figure>
-    <a href="../assets/java4shell/fixed-control.png"><img src="../assets/java4shell/fixed-control.png" alt="Wazuh Logtest decodes a fixed build and matches only the level-0 rule 112938." loading="lazy"></a>
-    <figcaption>Figure 3. The fixed-build control reaches rule 112938 at level 0 and produces no alert.</figcaption>
-  </figure>
+  <p>Repeat with <code>--mitigation unknown</code> to look for rule <code>112940</code>. Replay a record with <code>--vendor-status fixed</code> in Logtest to see the level-0 control. The full nine-case test runs with <code>sudo python3 tests/replay.py</code>.</p>
 
-  <p><a href="../assets/java4shell/manager-logtest.txt">Full manager transcript for the three captures</a> · <a href="https://github.com/SAMsploit1/java4shell-wazuh/blob/main/tests/results-wazuh-4.14.10.txt">Results for all nine replay cases</a></p>
+  <h3>5. Move collection to an agent when you are ready</h3>
+
+  <p>Keep the rules on the manager. On the Linux agent that will receive assessments, repeat the file and <code>&lt;localfile&gt;</code> setup from step 2 in the agent’s own <code>/var/ossec/etc/ossec.conf</code>. Then run these commands on the agent.</p>
+
+  <pre><code class="language-sh">sudo /var/ossec/bin/wazuh-logcollector -t
+sudo systemctl restart wazuh-agent</code></pre>
+
+  <p>Append a fresh synthetic record on the agent using step 4, then look for the alert on the manager. Confirm that the alert’s <code>agent.name</code> identifies your agent. Limit write access to the JSON file to your trusted inventory producer.</p>
+
+  <h2>What the lab verified</h2>
+
+  <p>On the Wazuh 4.14.10 manager (internal revision rc2), I appended three synthetic records to the monitored file. The manager wrote exactly two alerts: rule 112939 for the affected build without mitigation and rule 112940 for the affected build with unknown mitigation. The fixed-build control produced no alert. The separate Logtest suite passed all nine cases. The optional agent setup above still needs verification in your environment.</p>
+
+  <p><a href="../assets/java4shell/direct-logtest.txt">Logtest terminal transcript</a> · <a href="../assets/java4shell/alert-summary.txt">Live manager alert summary</a> · <a href="https://github.com/SAMsploit1/java4shell-wazuh/blob/main/tests/results-wazuh-4.14.10.txt">Nine-case replay results</a></p>
 
   <div class="cta">
     <a class="ghbtn" href="https://github.com/SAMsploit1/java4shell-wazuh">Java4Shell Wazuh project on GitHub ↗</a>
