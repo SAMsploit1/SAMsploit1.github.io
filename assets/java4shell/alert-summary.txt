@@ -1,0 +1,8 @@
+Rule 112939  |  level 8  |  synthetic-api
+  vendor=affected  cpu=present  mitigation=absent
+  source=/var/log/java4shell-assessments.jsonl
+
+Rule 112940  |  level 5  |  synthetic-api
+  vendor=affected  cpu=present  mitigation=unknown
+  source=/var/log/java4shell-assessments.jsonl
+

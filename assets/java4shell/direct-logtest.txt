@@ -1,0 +1,27 @@
+
+Starting wazuh-logtest v4.14.10
+Type one log per line
+
+**Phase 1: Completed pre-decoding.
+	full event: '{"event_type": "java4shell_runtime_assessment", "cve": "CVE-2026-114938", "workload": "synthetic-api", "runtime": "Fixture JVM", "vendor_status": "affected", "cpu_path": "present", "mitigation": "absent", "assessment_complete": "yes"}'
+
+**Phase 2: Completed decoding.
+	name: 'json'
+	assessment_complete: 'yes'
+	cpu_path: 'present'
+	cve: 'CVE-2026-114938'
+	event_type: 'java4shell_runtime_assessment'
+	mitigation: 'absent'
+	runtime: 'Fixture JVM'
+	vendor_status: 'affected'
+	workload: 'synthetic-api'
+
+**Phase 3: Completed filtering (rules).
+	id: '112939'
+	level: '8'
+	description: 'Java4Shell patch priority for synthetic-api running Fixture JVM'
+	groups: '['java4shell_exposure']'
+	firedtimes: '1'
+	mail: 'False'
+**Alert to be generated.
+
