@@ -50,11 +50,26 @@
 
   <p>The alerts describe exposure prerequisites. App-specific reachability and incident evidence require their own investigation. If a JVM missed the inventory pass, the absence of an alert gives no information about its status. A reliable collection process matters as much as the rule.</p>
 
-  <h2>Validation</h2>
+  <h2>What the Wazuh manager reported</h2>
 
-  <p>All nine cases passed in Wazuh Logtest on the 4.14.10 manager image, which reported revision rc2. Five controls produced no alerts. The replay uses synthetic inventory to exercise the alert paths and controls. It covers an affected JVM, fixed and unaffected builds, CPU capability absent, a verified mitigation, and missing evidence. It exercises the decision rules with known input. Production inventory accuracy and end-to-end agent ingestion are outside the replay.</p>
+  <p>All nine synthetic cases passed on the Wazuh 4.14.10 manager image (internal revision rc2). Five controls stayed silent. I reran three representative cases on a disposable manager and captured the decoder and rule output below. The images show excerpts from <code>wazuh-logtest</code>. Live agent ingestion and production runtime inventory remain unverified.</p>
 
-  <p><a href="https://github.com/SAMsploit1/java4shell-wazuh/blob/main/tests/results-wazuh-4.14.10.txt">Recorded Logtest output</a></p>
+  <figure>
+    <a href="../assets/java4shell/patch-priority.png"><img src="../assets/java4shell/patch-priority.png" alt="Wazuh Logtest decodes an affected build with CPU prerequisites present and mitigation absent, then matches rule 112939 at level 8." loading="lazy"></a>
+    <figcaption>Figure 1. An affected build with the CPU prerequisites present and no effective mitigation matches rule 112939 at level 8.</figcaption>
+  </figure>
+
+  <figure>
+    <a href="../assets/java4shell/evidence-gap.png"><img src="../assets/java4shell/evidence-gap.png" alt="Wazuh Logtest matches rule 112940 at level 5 for an affected build with unknown mitigation." loading="lazy"></a>
+    <figcaption>Figure 2. An unknown mitigation state routes the finding to rule 112940 at level 5 for follow-up.</figcaption>
+  </figure>
+
+  <figure>
+    <a href="../assets/java4shell/fixed-control.png"><img src="../assets/java4shell/fixed-control.png" alt="Wazuh Logtest decodes a fixed build and matches only the level-0 rule 112938." loading="lazy"></a>
+    <figcaption>Figure 3. The fixed-build control reaches rule 112938 at level 0 and produces no alert.</figcaption>
+  </figure>
+
+  <p><a href="../assets/java4shell/manager-logtest.txt">Full manager transcript for the three captures</a> · <a href="https://github.com/SAMsploit1/java4shell-wazuh/blob/main/tests/results-wazuh-4.14.10.txt">Results for all nine replay cases</a></p>
 
   <div class="cta">
     <a class="ghbtn" href="https://github.com/SAMsploit1/java4shell-wazuh">Java4Shell Wazuh project on GitHub ↗</a>
@@ -64,6 +79,7 @@
 <footer>
   <p>Written by <strong>SAMspl0it</strong> · <a href="../">more posts</a>.
   Wazuh and the Wazuh logo are trademarks of Wazuh Inc.; this is an independent community project.</p>
+  <p class="ambassador-links"><a href="https://wazuh.com/?utm_source=ambassadors&amp;utm_medium=referral&amp;utm_campaign=ambassadors+program">Wazuh homepage</a> · <a href="https://wazuh.com/ambassadors-program/?utm_source=ambassadors&amp;utm_medium=referral&amp;utm_campaign=ambassadors+program">Wazuh Ambassadors program</a></p>
 </footer>
 </body>
 </html>
